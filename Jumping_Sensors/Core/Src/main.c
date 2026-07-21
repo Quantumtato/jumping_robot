@@ -102,12 +102,12 @@ typedef struct {
 #define CAN_FB_TRQ_MIN        -1.0f
 #define CAN_FB_TRQ_MAX         1.0f
 
-#define LQR_X_K1             50.0f
-#define LQR_X_K2             0.0f
-#define LQR_X_K3             -0.01f
-#define LQR_Y_K1             50.0f
-#define LQR_Y_K2             0.0f
-#define LQR_Y_K3             -0.01f
+#define LQR_X_K_THETA              48.3391f
+#define LQR_X_K_THETA_DOT           3.0397f
+#define LQR_X_K_FLYWHEEL_SPEED     -0.02236f
+#define LQR_Y_K_THETA              48.3391f
+#define LQR_Y_K_THETA_DOT           3.0397f
+#define LQR_Y_K_FLYWHEEL_SPEED     -0.02236f
 #define LQR_TORQUE_LIMIT      0.4f
 #define LQR_THETA_SETPOINT_X  0.0f
 #define LQR_THETA_SETPOINT_Y  0.0f
@@ -1445,8 +1445,14 @@ int main(void)
     flywheel_y_vel = flywheel_y_feedback.velocity_actual;
     __enable_irq();
 
-    float torque_cmd_x = LQR_X_K1 * angle_err_x + LQR_X_K2 * gx_rads + LQR_X_K3 * flywheel_x_vel;
-    float torque_cmd_y = LQR_Y_K1 * angle_err_y + LQR_Y_K2 * gy_rads + LQR_Y_K3 * flywheel_y_vel;
+    /* Standard LQR convention: u = -Kx. The resulting applied signs are
+     * negative angle/rate feedback and positive flywheel-speed feedback. */
+    float torque_cmd_x = -(LQR_X_K_THETA * angle_err_x +
+                           LQR_X_K_THETA_DOT * gx_rads +
+                           LQR_X_K_FLYWHEEL_SPEED * flywheel_x_vel);
+    float torque_cmd_y = -(LQR_Y_K_THETA * angle_err_y +
+                           LQR_Y_K_THETA_DOT * gy_rads +
+                           LQR_Y_K_FLYWHEEL_SPEED * flywheel_y_vel);
     if (torque_cmd_x > LQR_TORQUE_LIMIT) torque_cmd_x = LQR_TORQUE_LIMIT;
     if (torque_cmd_x < -LQR_TORQUE_LIMIT) torque_cmd_x = -LQR_TORQUE_LIMIT;
     if (torque_cmd_y > LQR_TORQUE_LIMIT) torque_cmd_y = LQR_TORQUE_LIMIT;
