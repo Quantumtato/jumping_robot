@@ -51,6 +51,8 @@ typedef struct {
 #define SENSOR_AUX_FEEDBACK_ID   (SENSOR_ID + 0x101U)
 #define SENSOR_ACCEL_FEEDBACK_ID (SENSOR_ID + 0x102U)
 #define SENSOR_YAW_FEEDBACK_ID   (SENSOR_ID + 0x103U)
+#define SENSOR_LQR_GAIN_X_FEEDBACK_ID (SENSOR_ID + 0x104U)
+#define SENSOR_LQR_GAIN_Y_FEEDBACK_ID (SENSOR_ID + 0x105U)
 #define FLYWHEEL_X_ID            0x01U
 #define FLYWHEEL_Y_ID            0x02U
 #define FLYWHEEL_X_CTRL_ID       (FLYWHEEL_X_ID + 0x200U)
@@ -67,11 +69,14 @@ typedef struct {
 #define SENSOR_ERROR_CAN_TX      0x40U
 #define SENSOR_ERROR_IMU_ID      0x80U
 #define CAN_TX_PERIOD_MS         20U
+#define CAN_GAIN_TX_PERIOD_MS   500U
 #define CAN_CTRL_PERIOD_MS       1U
 #define CAN_HEALTH_PERIOD_MS     10U
 #define MOTOR_CMD_OVERRIDE_MS    250U
 #define MOTOR_ALIGN_OVERRIDE_MS 2000U
 #define SENSOR_LED_CMD_MAGIC     0xA5U
+#define SENSOR_LQR_GAIN_CMD_MAGIC 0x4BU
+#define SENSOR_LQR_GAIN_VERSION   0x01U
 #define SENSOR_LED_COUNT         4U
 #define SENSOR_LED_TEST_CYCLE_ENABLE 1U
 #define SENSOR_LED_TEST_PERIOD_MS   250U
@@ -103,11 +108,14 @@ typedef struct {
 #define CAN_FB_TRQ_MAX         1.0f
 
 #define LQR_X_K_THETA              48.3391f
-#define LQR_X_K_THETA_DOT           3.0397f
-#define LQR_X_K_FLYWHEEL_SPEED     -0.02236f
+#define LQR_X_K_THETA_DOT           0.0f
+#define LQR_X_K_FLYWHEEL_SPEED     -0.2236f
 #define LQR_Y_K_THETA              48.3391f
-#define LQR_Y_K_THETA_DOT           3.0397f
-#define LQR_Y_K_FLYWHEEL_SPEED     -0.02236f
+#define LQR_Y_K_THETA_DOT           0.0f
+#define LQR_Y_K_FLYWHEEL_SPEED     -0.2236f
+#define LQR_GAIN_THETA_SCALE       100.0f
+#define LQR_GAIN_RATE_SCALE       1000.0f
+#define LQR_GAIN_WHEEL_SCALE     10000.0f
 #define LQR_TORQUE_LIMIT      0.4f
 #define LQR_THETA_SETPOINT_X  0.0f
 #define LQR_THETA_SETPOINT_Y  0.0f
@@ -205,6 +213,7 @@ static volatile uint16_t tof_distance_mm = 0U;
 static uint8_t  sensor_error_code = SENSOR_ERROR_IMU_ID;
 static uint32_t ctrl_t_prev   = 0;
 static uint32_t can_tx_prev   = 0;
+static uint32_t can_gain_tx_prev = 0;
 static uint32_t can_ctrl_prev = 0;
 static uint32_t can_health_prev = 0;
 static volatile uint32_t can_rx_count  = 0;
@@ -216,6 +225,12 @@ static volatile uint32_t flywheel_x_override_until_ms = 0U;
 static volatile uint32_t flywheel_y_override_until_ms = 0U;
 static volatile uint8_t flywheel_x_enabled = 0U;
 static volatile uint8_t flywheel_y_enabled = 0U;
+static volatile float lqr_x_k_theta = LQR_X_K_THETA;
+static volatile float lqr_x_k_theta_dot = LQR_X_K_THETA_DOT;
+static volatile float lqr_x_k_flywheel_speed = LQR_X_K_FLYWHEEL_SPEED;
+static volatile float lqr_y_k_theta = LQR_Y_K_THETA;
+static volatile float lqr_y_k_theta_dot = LQR_Y_K_THETA_DOT;
+static volatile float lqr_y_k_flywheel_speed = LQR_Y_K_FLYWHEEL_SPEED;
 #if (UART_PERIODIC_DEBUG_ENABLE == 1U)
 static uint32_t print_counter = 0;
 static uint32_t loop_count    = 0;
@@ -282,6 +297,11 @@ static HAL_StatusTypeDef can_send_sensor_accel_feedback(float accel_angle_x_valu
                                                         float accel_angle_y_value);
 static HAL_StatusTypeDef can_send_sensor_yaw_feedback(float body_angle_z,
                                                        float gyro_rate_z);
+static HAL_StatusTypeDef can_send_lqr_gain_feedback(uint32_t feedback_id,
+                                                    uint8_t axis,
+                                                    float k_theta,
+                                                    float k_theta_dot,
+                                                    float k_flywheel_speed);
 static void sensor_led_init(void);
 static void sensor_led_set_all(uint8_t r, uint8_t g, uint8_t b);
 static void sensor_led_encode_byte(uint8_t value, uint32_t *index);
@@ -969,6 +989,40 @@ static HAL_StatusTypeDef can_send_sensor_yaw_feedback(float body_angle_z,
   return HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &tx_hdr, tx_data);
 }
 
+static HAL_StatusTypeDef can_send_lqr_gain_feedback(uint32_t feedback_id,
+                                                    uint8_t axis,
+                                                    float k_theta,
+                                                    float k_theta_dot,
+                                                    float k_flywheel_speed)
+{
+  FDCAN_TxHeaderTypeDef tx_hdr = {0};
+  uint8_t tx_data[8];
+  int16_t theta_raw = (int16_t)lroundf(k_theta * LQR_GAIN_THETA_SCALE);
+  int16_t rate_raw = (int16_t)lroundf(k_theta_dot * LQR_GAIN_RATE_SCALE);
+  int16_t wheel_raw = (int16_t)lroundf(k_flywheel_speed * LQR_GAIN_WHEEL_SCALE);
+
+  tx_data[0] = SENSOR_LQR_GAIN_VERSION;
+  tx_data[1] = axis;
+  tx_data[2] = (uint8_t)(((uint16_t)theta_raw >> 8) & 0xFFU);
+  tx_data[3] = (uint8_t)((uint16_t)theta_raw & 0xFFU);
+  tx_data[4] = (uint8_t)(((uint16_t)rate_raw >> 8) & 0xFFU);
+  tx_data[5] = (uint8_t)((uint16_t)rate_raw & 0xFFU);
+  tx_data[6] = (uint8_t)(((uint16_t)wheel_raw >> 8) & 0xFFU);
+  tx_data[7] = (uint8_t)((uint16_t)wheel_raw & 0xFFU);
+
+  tx_hdr.Identifier          = feedback_id;
+  tx_hdr.IdType              = FDCAN_STANDARD_ID;
+  tx_hdr.TxFrameType         = FDCAN_DATA_FRAME;
+  tx_hdr.DataLength          = FDCAN_DLC_BYTES_8;
+  tx_hdr.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+  tx_hdr.BitRateSwitch       = FDCAN_BRS_OFF;
+  tx_hdr.FDFormat            = FDCAN_CLASSIC_CAN;
+  tx_hdr.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
+  tx_hdr.MessageMarker       = 0;
+
+  return HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &tx_hdr, tx_data);
+}
+
 static void sensor_led_encode_byte(uint8_t value, uint32_t *index)
 {
   uint8_t bit;
@@ -1150,6 +1204,29 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     led_b_cmd = rx_data[3];
     led_update_pending = 1U;
 #endif
+  }
+  else if ((rx_hdr.Identifier == SENSOR_ID || rx_hdr.Identifier == SENSOR_CTRL_ID) &&
+           rx_data[0] == SENSOR_LQR_GAIN_CMD_MAGIC)
+  {
+    int16_t theta_raw = (int16_t)(((uint16_t)rx_data[2] << 8) | rx_data[3]);
+    int16_t rate_raw = (int16_t)(((uint16_t)rx_data[4] << 8) | rx_data[5]);
+    int16_t wheel_raw = (int16_t)(((uint16_t)rx_data[6] << 8) | rx_data[7]);
+    float k_theta = (float)theta_raw / LQR_GAIN_THETA_SCALE;
+    float k_theta_dot = (float)rate_raw / LQR_GAIN_RATE_SCALE;
+    float k_flywheel_speed = (float)wheel_raw / LQR_GAIN_WHEEL_SCALE;
+
+    if (rx_data[1] == 0U)
+    {
+      lqr_x_k_theta = k_theta;
+      lqr_x_k_theta_dot = k_theta_dot;
+      lqr_x_k_flywheel_speed = k_flywheel_speed;
+    }
+    else if (rx_data[1] == 1U)
+    {
+      lqr_y_k_theta = k_theta;
+      lqr_y_k_theta_dot = k_theta_dot;
+      lqr_y_k_flywheel_speed = k_flywheel_speed;
+    }
   }
 }
 
@@ -1440,19 +1517,31 @@ int main(void)
     float angle_err_y = wrap_to_pi(theta_y - LQR_THETA_SETPOINT_Y);
     float flywheel_x_vel;
     float flywheel_y_vel;
+    float x_k_theta;
+    float x_k_theta_dot;
+    float x_k_flywheel_speed;
+    float y_k_theta;
+    float y_k_theta_dot;
+    float y_k_flywheel_speed;
     __disable_irq();
     flywheel_x_vel = flywheel_x_feedback.velocity_actual;
     flywheel_y_vel = flywheel_y_feedback.velocity_actual;
+    x_k_theta = lqr_x_k_theta;
+    x_k_theta_dot = lqr_x_k_theta_dot;
+    x_k_flywheel_speed = lqr_x_k_flywheel_speed;
+    y_k_theta = lqr_y_k_theta;
+    y_k_theta_dot = lqr_y_k_theta_dot;
+    y_k_flywheel_speed = lqr_y_k_flywheel_speed;
     __enable_irq();
 
     /* Standard LQR convention: u = -Kx. The resulting applied signs are
      * negative angle/rate feedback and positive flywheel-speed feedback. */
-    float torque_cmd_x = -(LQR_X_K_THETA * angle_err_x +
-                           LQR_X_K_THETA_DOT * gx_rads +
-                           LQR_X_K_FLYWHEEL_SPEED * flywheel_x_vel);
-    float torque_cmd_y = -(LQR_Y_K_THETA * angle_err_y +
-                           LQR_Y_K_THETA_DOT * gy_rads +
-                           LQR_Y_K_FLYWHEEL_SPEED * flywheel_y_vel);
+    float torque_cmd_x = -(x_k_theta * angle_err_x +
+                           x_k_theta_dot * gx_rads +
+                           x_k_flywheel_speed * flywheel_x_vel);
+    float torque_cmd_y = -(y_k_theta * angle_err_y +
+                           y_k_theta_dot * gy_rads +
+                           y_k_flywheel_speed * flywheel_y_vel);
     if (torque_cmd_x > LQR_TORQUE_LIMIT) torque_cmd_x = LQR_TORQUE_LIMIT;
     if (torque_cmd_x < -LQR_TORQUE_LIMIT) torque_cmd_x = -LQR_TORQUE_LIMIT;
     if (torque_cmd_y > LQR_TORQUE_LIMIT) torque_cmd_y = LQR_TORQUE_LIMIT;
@@ -1507,6 +1596,27 @@ int main(void)
         if (accel_tx_status == HAL_OK)
         {
           gyro_reject_latched = 0U;
+        }
+      }
+
+      if ((now - can_gain_tx_prev) >= CAN_GAIN_TX_PERIOD_MS)
+      {
+        can_gain_tx_prev = now;
+        if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0U)
+        {
+          (void)can_send_lqr_gain_feedback(SENSOR_LQR_GAIN_X_FEEDBACK_ID,
+                                           0U,
+                                           x_k_theta,
+                                           x_k_theta_dot,
+                                           x_k_flywheel_speed);
+        }
+        if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0U)
+        {
+          (void)can_send_lqr_gain_feedback(SENSOR_LQR_GAIN_Y_FEEDBACK_ID,
+                                           1U,
+                                           y_k_theta,
+                                           y_k_theta_dot,
+                                           y_k_flywheel_speed);
         }
       }
       else

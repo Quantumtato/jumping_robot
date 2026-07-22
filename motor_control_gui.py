@@ -44,6 +44,12 @@ SENSOR_LED_CMD_MAGIC = 0xA5
 SENSOR_FB_X_ID = 0x104
 SENSOR_FB_Y_ID = 0x105
 SENSOR_ACCEL_FB_ID = 0x106
+SENSOR_GAIN_X_FB_ID = 0x108
+SENSOR_GAIN_Y_FB_ID = 0x109
+SENSOR_CTRL_ID = 0x204
+SENSOR_GAIN_CMD_MAGIC = 0x4B
+SENSOR_GAIN_VERSION = 0x01
+SENSOR_GAIN_SCALES = (100.0, 1000.0, 10000.0)
 FLYWHEEL_X_FB_ID = 0x101
 FLYWHEEL_Y_FB_ID = 0x102
 FLYWHEEL_X_CMD_ID = 0x001
@@ -141,6 +147,27 @@ def pack_sensor_led_frame(r: int, g: int, b: int, sensor_ctrl_id: int):
     core = [0x01, 0x01, 0x00] + id_bytes + [0x08] + can_data + [0x00]
     return bytearray([0xAA, 0x55] + core + [_checksum(core)])
 
+def _gain_to_i16(value: float, scale: float) -> bytes:
+    raw = round(float(value) * scale)
+    if not -32768 <= raw <= 32767:
+        raise ValueError(f"Gain {value} is outside the signed CAN range")
+    return int(raw).to_bytes(2, byteorder="big", signed=True)
+
+def pack_lqr_gain_frame(axis: str, k_theta: float, k_rate: float, k_wheel: float):
+    if axis not in ("x", "y"):
+        raise ValueError(f"Unknown LQR axis: {axis}")
+    can_data = bytearray([SENSOR_GAIN_CMD_MAGIC, 0 if axis == "x" else 1])
+    for value, scale in zip((k_theta, k_rate, k_wheel), SENSOR_GAIN_SCALES):
+        can_data.extend(_gain_to_i16(value, scale))
+    id_bytes = [
+        SENSOR_CTRL_ID & 0xFF,
+        (SENSOR_CTRL_ID >> 8) & 0xFF,
+        0x00,
+        0x00,
+    ]
+    core = [0x01, 0x01, 0x00] + id_bytes + [0x08] + list(can_data) + [0x00]
+    return bytearray([0xAA, 0x55] + core + [_checksum(core)])
+
 def make_init_frame():
     core = [0x12, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
@@ -202,10 +229,12 @@ class MotorGUI:
         self._telemetry_lock = threading.Lock()
         self._telemetry = {
             "x": {"angle": 0.0, "wrapped_angle": 0.0, "rate": 0.0, "speed": 0.0, "command": 0.0,
+                  "gains": (48.3391, 0.0, -0.2236), "gains_seen": False,
                   "accel_angle": 0.0, "accel_wrapped_angle": 0.0, "accel_seen": False,
                   "accel_valid": False, "gyro_rejected": False, "resync_count": None,
                   "state": 0, "error": 0, "sensor_seen": False, "motor_seen": False},
             "y": {"angle": 0.0, "wrapped_angle": 0.0, "rate": 0.0, "speed": 0.0, "command": 0.0,
+                  "gains": (48.3391, 0.0, -0.2236), "gains_seen": False,
                   "accel_angle": 0.0, "accel_wrapped_angle": 0.0, "accel_seen": False,
                   "accel_valid": False, "gyro_rejected": False, "resync_count": None,
                   "state": 0, "error": 0, "sensor_seen": False, "motor_seen": False},
@@ -223,6 +252,8 @@ class MotorGUI:
         self._lqr_angle_canvas = None
         self._lqr_command_canvas = None
         self._lqr_state_vars = {}
+        self._lqr_gain_input_vars = {}
+        self._lqr_gain_readback_vars = {}
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -539,7 +570,7 @@ class MotorGUI:
         win = tk.Toplevel(self.root)
         win.title("LQR Telemetry")
         win.configure(bg=BG)
-        win.geometry("920x650")
+        win.geometry("1040x760")
         self._lqr_window = win
         self._lqr_axis_var = tk.StringVar(value="x")
 
@@ -574,6 +605,52 @@ class MotorGUI:
                      font=("Consolas", 9, "bold"), width=16, anchor="w").pack(
                          side="left", padx=6)
 
+        gain_panel = tk.Frame(win, bg=BG)
+        gain_panel.pack(fill="x", padx=12, pady=(0, 8))
+        tk.Label(
+            gain_panel,
+            text="SIGNED LQR GAINS K  (firmware applies u = -Kx)",
+            bg=BG,
+            fg=MAUVE,
+            font=("Consolas", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=7, sticky="w", pady=(0, 4))
+        for column, label in enumerate(("Axis", "K theta", "K rate", "K wheel", "", "Readback K / applied -K")):
+            tk.Label(
+                gain_panel, text=label, bg=BG, fg=MUTED,
+                font=("Consolas", 9, "bold")
+            ).grid(row=1, column=column, padx=4, sticky="w")
+
+        defaults = ("48.3391", "0.0", "-0.2236")
+        for row, axis in enumerate(("x", "y"), start=2):
+            tk.Label(
+                gain_panel, text=axis.upper(), bg=BG, fg=BLUE,
+                font=("Consolas", 10, "bold")
+            ).grid(row=row, column=0, padx=4, pady=2)
+            variables = [tk.StringVar(value=value) for value in defaults]
+            self._lqr_gain_input_vars[axis] = variables
+            for column, variable in enumerate(variables, start=1):
+                ttk.Entry(gain_panel, textvariable=variable, width=11).grid(
+                    row=row, column=column, padx=4, pady=2
+                )
+            ttk.Button(
+                gain_panel,
+                text="Set",
+                width=7,
+                command=lambda a=axis: self._queue_lqr_gains(a),
+            ).grid(row=row, column=4, padx=6)
+            readback_var = tk.StringVar(value="waiting for CAN")
+            self._lqr_gain_readback_vars[axis] = readback_var
+            tk.Label(
+                gain_panel, textvariable=readback_var, bg=BG, fg=GREEN,
+                font=("Consolas", 9), anchor="w", width=48
+            ).grid(row=row, column=5, padx=4, sticky="w")
+        ttk.Button(
+            gain_panel,
+            text="Set Both",
+            width=10,
+            command=self._queue_lqr_gains_both,
+        ).grid(row=2, column=6, rowspan=2, padx=(8, 0))
+
         self._lqr_angle_canvas = tk.Canvas(win, bg=SURFACE, highlightthickness=0)
         self._lqr_angle_canvas.pack(fill="both", expand=True, padx=12, pady=(2, 6))
         self._lqr_command_canvas = tk.Canvas(win, bg=SURFACE, highlightthickness=0)
@@ -584,6 +661,8 @@ class MotorGUI:
             self._lqr_angle_canvas = None
             self._lqr_command_canvas = None
             self._lqr_state_vars = {}
+            self._lqr_gain_input_vars = {}
+            self._lqr_gain_readback_vars = {}
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", _closed)
@@ -606,6 +685,35 @@ class MotorGUI:
             self._ctrl_queue.sort(key=lambda item: item[0])
         self._log(f"{label} queued.")
 
+    def _gain_values_from_ui(self, axis: str):
+        variables = self._lqr_gain_input_vars.get(axis)
+        if variables is None:
+            raise ValueError(f"{axis.upper()} gain controls are not open")
+        try:
+            return tuple(float(variable.get().strip()) for variable in variables)
+        except ValueError as exc:
+            raise ValueError("LQR gains must be signed numbers") from exc
+
+    def _queue_lqr_gains(self, axis: str):
+        if not self.running:
+            self._log("Connect CAN before sending LQR gains.")
+            return
+        try:
+            frame = pack_lqr_gain_frame(axis, *self._gain_values_from_ui(axis))
+        except ValueError as exc:
+            self._log(str(exc))
+            return
+        now = time.monotonic()
+        with self._ctrl_lock:
+            for index in range(2):
+                self._ctrl_queue.append((now + index * 0.02, frame))
+            self._ctrl_queue.sort(key=lambda item: item[0])
+        self._log(f"{axis.upper()} signed LQR gains queued.")
+
+    def _queue_lqr_gains_both(self):
+        self._queue_lqr_gains("x")
+        self._queue_lqr_gains("y")
+
     def _refresh_lqr_monitor(self):
         if self._lqr_window is None or not self._lqr_window.winfo_exists():
             return
@@ -624,6 +732,16 @@ class MotorGUI:
             gyro_state = "GYRO REJECT" if values["gyro_rejected"] else "GYRO OK"
             self._lqr_state_vars[axis].set(
                 f"{state_name} {accel_state} {gyro_state} err=0x{values['error']:02X}")
+            gain_var = self._lqr_gain_readback_vars.get(axis)
+            if gain_var is not None:
+                if values["gains_seen"]:
+                    gains = values["gains"]
+                    gain_var.set(
+                        f"K [{gains[0]:+.2f}, {gains[1]:+.3f}, {gains[2]:+.4f}]  "
+                        f"-K [{-gains[0]:+.2f}, {-gains[1]:+.3f}, {-gains[2]:+.4f}]"
+                    )
+                else:
+                    gain_var.set("waiting for CAN")
 
         axis = self._lqr_axis_var.get()
         self._draw_trace(self._lqr_angle_canvas,
@@ -851,6 +969,22 @@ class MotorGUI:
         self._log_var.set(msg)
 
     def _parse_lqr_telemetry(self, can_id: int, data: bytes):
+        if can_id in (SENSOR_GAIN_X_FB_ID, SENSOR_GAIN_Y_FB_ID):
+            axis = "x" if can_id == SENSOR_GAIN_X_FB_ID else "y"
+            expected_axis = 0 if axis == "x" else 1
+            if data[0] != SENSOR_GAIN_VERSION or data[1] != expected_axis:
+                return
+            gains = tuple(
+                int.from_bytes(
+                    data[offset:offset + 2], byteorder="big", signed=True
+                ) / scale
+                for offset, scale in zip((2, 4, 6), SENSOR_GAIN_SCALES)
+            )
+            with self._telemetry_lock:
+                self._telemetry[axis]["gains"] = gains
+                self._telemetry[axis]["gains_seen"] = True
+            return
+
         if can_id == SENSOR_ACCEL_FB_ID:
             accel_values = {
                 "x": (uint_to_float((data[2] << 8) | data[3], P_MIN, P_MAX, 16), data[6]),
