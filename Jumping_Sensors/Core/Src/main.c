@@ -53,6 +53,7 @@ typedef struct {
 #define SENSOR_YAW_FEEDBACK_ID   (SENSOR_ID + 0x103U)
 #define SENSOR_LQR_GAIN_X_FEEDBACK_ID (SENSOR_ID + 0x104U)
 #define SENSOR_LQR_GAIN_Y_FEEDBACK_ID (SENSOR_ID + 0x105U)
+#define SENSOR_MADGWICK_GAIN_FEEDBACK_ID (SENSOR_ID + 0x106U)
 #define FLYWHEEL_X_ID            0x01U
 #define FLYWHEEL_Y_ID            0x02U
 #define FLYWHEEL_X_CTRL_ID       (FLYWHEEL_X_ID + 0x200U)
@@ -77,6 +78,8 @@ typedef struct {
 #define SENSOR_LED_CMD_MAGIC     0xA5U
 #define SENSOR_LQR_GAIN_CMD_MAGIC 0x4BU
 #define SENSOR_LQR_GAIN_VERSION   0x01U
+#define SENSOR_MADGWICK_GAIN_CMD_MAGIC 0x4DU
+#define SENSOR_MADGWICK_GAIN_VERSION   0x01U
 #define SENSOR_LED_COUNT         4U
 #define SENSOR_LED_TEST_CYCLE_ENABLE 1U
 #define SENSOR_LED_TEST_PERIOD_MS   250U
@@ -127,6 +130,8 @@ typedef struct {
 #define ACCEL_RATE_LIMIT_RAD_S    0.75f
 #define ACCEL_VALID_SAMPLES       40U
 #define MADGWICK_BETA              0.25f
+#define MADGWICK_BETA_SCALE     10000.0f
+#define MADGWICK_BETA_MAX           2.0f
 #define GYRO_MAX_BODY_RATE_RAD_S  12.0f
 #define GYRO_MAX_SLEW_RAD_S2     400.0f
 #define GYRO_SLEW_MARGIN_RAD_S     0.05f
@@ -231,6 +236,7 @@ static volatile float lqr_x_k_flywheel_speed = LQR_X_K_FLYWHEEL_SPEED;
 static volatile float lqr_y_k_theta = LQR_Y_K_THETA;
 static volatile float lqr_y_k_theta_dot = LQR_Y_K_THETA_DOT;
 static volatile float lqr_y_k_flywheel_speed = LQR_Y_K_FLYWHEEL_SPEED;
+static volatile float madgwick_beta = MADGWICK_BETA;
 #if (UART_PERIODIC_DEBUG_ENABLE == 1U)
 static uint32_t print_counter = 0;
 static uint32_t loop_count    = 0;
@@ -275,7 +281,7 @@ static uint8_t  gyro_filter_update(float raw_x, float raw_y, float raw_z,
 static void     madgwick_set_tilt(float roll, float pitch);
 static void     madgwick_update_imu(float gx, float gy, float gz,
                                     float ax, float ay, float az,
-                                    float dt, uint8_t use_accel);
+                                    float dt, uint8_t use_accel, float beta);
 static void     madgwick_get_attitude(float *roll, float *pitch, float *yaw);
 static void     can_pack_command(uint8_t *data, const CAN_Command_t *cmd);
 static void     can_unpack_motor_feedback(const uint8_t *data, CAN_MotorFeedback_t *fb);
@@ -302,6 +308,7 @@ static HAL_StatusTypeDef can_send_lqr_gain_feedback(uint32_t feedback_id,
                                                     float k_theta,
                                                     float k_theta_dot,
                                                     float k_flywheel_speed);
+static HAL_StatusTypeDef can_send_madgwick_gain_feedback(float beta);
 static void sensor_led_init(void);
 static void sensor_led_set_all(uint8_t r, uint8_t g, uint8_t b);
 static void sensor_led_encode_byte(uint8_t value, uint32_t *index);
@@ -509,7 +516,7 @@ static void madgwick_set_tilt(float roll, float pitch)
 
 static void madgwick_update_imu(float gx, float gy, float gz,
                                 float ax, float ay, float az,
-                                float dt, uint8_t use_accel)
+                                float dt, uint8_t use_accel, float beta)
 {
   float qw = attitude_q_w;
   float qx = attitude_q_x;
@@ -581,10 +588,10 @@ static void madgwick_update_imu(float gx, float gy, float gz,
       if (step_norm_sq > 0.0f)
       {
         inv_step_norm = 1.0f / sqrtf(step_norm_sq);
-        q_dot_w -= MADGWICK_BETA * s_w * inv_step_norm;
-        q_dot_x -= MADGWICK_BETA * s_x * inv_step_norm;
-        q_dot_y -= MADGWICK_BETA * s_y * inv_step_norm;
-        q_dot_z -= MADGWICK_BETA * s_z * inv_step_norm;
+        q_dot_w -= beta * s_w * inv_step_norm;
+        q_dot_x -= beta * s_x * inv_step_norm;
+        q_dot_y -= beta * s_y * inv_step_norm;
+        q_dot_z -= beta * s_z * inv_step_norm;
       }
     }
   }
@@ -1023,6 +1030,29 @@ static HAL_StatusTypeDef can_send_lqr_gain_feedback(uint32_t feedback_id,
   return HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &tx_hdr, tx_data);
 }
 
+static HAL_StatusTypeDef can_send_madgwick_gain_feedback(float beta)
+{
+  FDCAN_TxHeaderTypeDef tx_hdr = {0};
+  uint8_t tx_data[8] = {0};
+  uint16_t beta_raw = (uint16_t)lroundf(beta * MADGWICK_BETA_SCALE);
+
+  tx_data[0] = SENSOR_MADGWICK_GAIN_VERSION;
+  tx_data[2] = (uint8_t)((beta_raw >> 8) & 0xFFU);
+  tx_data[3] = (uint8_t)(beta_raw & 0xFFU);
+
+  tx_hdr.Identifier          = SENSOR_MADGWICK_GAIN_FEEDBACK_ID;
+  tx_hdr.IdType              = FDCAN_STANDARD_ID;
+  tx_hdr.TxFrameType         = FDCAN_DATA_FRAME;
+  tx_hdr.DataLength          = FDCAN_DLC_BYTES_8;
+  tx_hdr.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+  tx_hdr.BitRateSwitch       = FDCAN_BRS_OFF;
+  tx_hdr.FDFormat            = FDCAN_CLASSIC_CAN;
+  tx_hdr.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
+  tx_hdr.MessageMarker       = 0;
+
+  return HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &tx_hdr, tx_data);
+}
+
 static void sensor_led_encode_byte(uint8_t value, uint32_t *index)
 {
   uint8_t bit;
@@ -1226,6 +1256,17 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
       lqr_y_k_theta = k_theta;
       lqr_y_k_theta_dot = k_theta_dot;
       lqr_y_k_flywheel_speed = k_flywheel_speed;
+    }
+  }
+  else if ((rx_hdr.Identifier == SENSOR_ID || rx_hdr.Identifier == SENSOR_CTRL_ID) &&
+           rx_data[0] == SENSOR_MADGWICK_GAIN_CMD_MAGIC &&
+           rx_data[1] == SENSOR_MADGWICK_GAIN_VERSION)
+  {
+    uint16_t beta_raw = ((uint16_t)rx_data[2] << 8) | rx_data[3];
+    float beta = (float)beta_raw / MADGWICK_BETA_SCALE;
+    if (beta <= MADGWICK_BETA_MAX)
+    {
+      madgwick_beta = beta;
     }
   }
 }
@@ -1500,6 +1541,7 @@ int main(void)
         (accel_valid_count >= ACCEL_VALID_SAMPLES &&
          fabsf(gx_rads) <= ACCEL_RATE_LIMIT_RAD_S &&
          fabsf(gy_rads) <= ACCEL_RATE_LIMIT_RAD_S) ? 1U : 0U;
+    float attitude_beta = madgwick_beta;
     madgwick_update_imu(gx_rads,
                         gy_rads,
                         gz_rads,
@@ -1507,7 +1549,8 @@ int main(void)
                         -accel_lpf_y_g,
                         accel_lpf_z_g,
                         dt,
-                        accel_angles_valid);
+                        accel_angles_valid,
+                        attitude_beta);
     madgwick_get_attitude(&theta_x, &theta_y, &theta_z);
 
     theta_x = wrap_to_pi(theta_x);
@@ -1617,6 +1660,10 @@ int main(void)
                                            y_k_theta,
                                            y_k_theta_dot,
                                            y_k_flywheel_speed);
+        }
+        if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0U)
+        {
+          (void)can_send_madgwick_gain_feedback(attitude_beta);
         }
       }
       else

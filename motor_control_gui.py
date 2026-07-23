@@ -46,10 +46,15 @@ SENSOR_FB_Y_ID = 0x105
 SENSOR_ACCEL_FB_ID = 0x106
 SENSOR_GAIN_X_FB_ID = 0x108
 SENSOR_GAIN_Y_FB_ID = 0x109
+SENSOR_MADGWICK_GAIN_FB_ID = 0x10A
 SENSOR_CTRL_ID = 0x204
 SENSOR_GAIN_CMD_MAGIC = 0x4B
 SENSOR_GAIN_VERSION = 0x01
 SENSOR_GAIN_SCALES = (100.0, 1000.0, 10000.0)
+SENSOR_MADGWICK_GAIN_CMD_MAGIC = 0x4D
+SENSOR_MADGWICK_GAIN_VERSION = 0x01
+SENSOR_MADGWICK_BETA_SCALE = 10000.0
+SENSOR_MADGWICK_BETA_MAX = 2.0
 FLYWHEEL_X_FB_ID = 0x101
 FLYWHEEL_Y_FB_ID = 0x102
 FLYWHEEL_X_CMD_ID = 0x001
@@ -168,6 +173,32 @@ def pack_lqr_gain_frame(axis: str, k_theta: float, k_rate: float, k_wheel: float
     core = [0x01, 0x01, 0x00] + id_bytes + [0x08] + list(can_data) + [0x00]
     return bytearray([0xAA, 0x55] + core + [_checksum(core)])
 
+def pack_madgwick_gain_frame(beta: float):
+    beta = float(beta)
+    if not 0.0 <= beta <= SENSOR_MADGWICK_BETA_MAX:
+        raise ValueError(
+            f"Madgwick beta must be between 0 and {SENSOR_MADGWICK_BETA_MAX:g}"
+        )
+    beta_raw = round(beta * SENSOR_MADGWICK_BETA_SCALE)
+    can_data = bytearray([
+        SENSOR_MADGWICK_GAIN_CMD_MAGIC,
+        SENSOR_MADGWICK_GAIN_VERSION,
+        (beta_raw >> 8) & 0xFF,
+        beta_raw & 0xFF,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+    ])
+    id_bytes = [
+        SENSOR_CTRL_ID & 0xFF,
+        (SENSOR_CTRL_ID >> 8) & 0xFF,
+        0x00,
+        0x00,
+    ]
+    core = [0x01, 0x01, 0x00] + id_bytes + [0x08] + list(can_data) + [0x00]
+    return bytearray([0xAA, 0x55] + core + [_checksum(core)])
+
 def make_init_frame():
     core = [0x12, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
@@ -254,6 +285,10 @@ class MotorGUI:
         self._lqr_state_vars = {}
         self._lqr_gain_input_vars = {}
         self._lqr_gain_readback_vars = {}
+        self._madgwick_beta = 0.25
+        self._madgwick_beta_seen = False
+        self._madgwick_beta_input_var = None
+        self._madgwick_beta_readback_var = None
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -650,6 +685,25 @@ class MotorGUI:
             width=10,
             command=self._queue_lqr_gains_both,
         ).grid(row=2, column=6, rowspan=2, padx=(8, 0))
+        tk.Label(
+            gain_panel, text="Madgwick beta", bg=BG, fg=BLUE,
+            font=("Consolas", 10, "bold")
+        ).grid(row=4, column=0, padx=4, pady=(8, 2), sticky="w")
+        self._madgwick_beta_input_var = tk.StringVar(value="0.25")
+        ttk.Entry(
+            gain_panel, textvariable=self._madgwick_beta_input_var, width=11
+        ).grid(row=4, column=1, padx=4, pady=(8, 2))
+        ttk.Button(
+            gain_panel,
+            text="Set beta",
+            width=10,
+            command=self._queue_madgwick_beta,
+        ).grid(row=4, column=2, padx=6, pady=(8, 2))
+        self._madgwick_beta_readback_var = tk.StringVar(value="waiting for CAN")
+        tk.Label(
+            gain_panel, textvariable=self._madgwick_beta_readback_var,
+            bg=BG, fg=GREEN, font=("Consolas", 9), anchor="w", width=30
+        ).grid(row=4, column=3, columnspan=3, padx=4, pady=(8, 2), sticky="w")
 
         self._lqr_angle_canvas = tk.Canvas(win, bg=SURFACE, highlightthickness=0)
         self._lqr_angle_canvas.pack(fill="both", expand=True, padx=12, pady=(2, 6))
@@ -663,6 +717,8 @@ class MotorGUI:
             self._lqr_state_vars = {}
             self._lqr_gain_input_vars = {}
             self._lqr_gain_readback_vars = {}
+            self._madgwick_beta_input_var = None
+            self._madgwick_beta_readback_var = None
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", _closed)
@@ -714,12 +770,34 @@ class MotorGUI:
         self._queue_lqr_gains("x")
         self._queue_lqr_gains("y")
 
+    def _queue_madgwick_beta(self):
+        if not self.running:
+            self._log("Connect CAN before sending Madgwick beta.")
+            return
+        try:
+            if self._madgwick_beta_input_var is None:
+                raise ValueError("Madgwick beta control is not open")
+            frame = pack_madgwick_gain_frame(
+                float(self._madgwick_beta_input_var.get().strip())
+            )
+        except ValueError as exc:
+            self._log(str(exc))
+            return
+        now = time.monotonic()
+        with self._ctrl_lock:
+            for index in range(2):
+                self._ctrl_queue.append((now + index * 0.02, frame))
+            self._ctrl_queue.sort(key=lambda item: item[0])
+        self._log("Madgwick beta queued.")
+
     def _refresh_lqr_monitor(self):
         if self._lqr_window is None or not self._lqr_window.winfo_exists():
             return
 
         with self._telemetry_lock:
             snapshot = {axis: values.copy() for axis, values in self._telemetry.items()}
+            madgwick_beta = self._madgwick_beta
+            madgwick_beta_seen = self._madgwick_beta_seen
 
         for axis, values in snapshot.items():
             if values["sensor_seen"]:
@@ -744,6 +822,13 @@ class MotorGUI:
                     gain_var.set("waiting for CAN")
 
         axis = self._lqr_axis_var.get()
+        if self._madgwick_beta_readback_var is not None:
+            if madgwick_beta_seen:
+                self._madgwick_beta_readback_var.set(
+                    f"beta = {madgwick_beta:.4f}"
+                )
+            else:
+                self._madgwick_beta_readback_var.set("waiting for CAN")
         self._draw_trace(self._lqr_angle_canvas,
                          self._plot_history[axis]["angle"],
                          f"{axis.upper()} angle: Madgwick estimate vs filtered accel",
@@ -969,6 +1054,17 @@ class MotorGUI:
         self._log_var.set(msg)
 
     def _parse_lqr_telemetry(self, can_id: int, data: bytes):
+        if can_id == SENSOR_MADGWICK_GAIN_FB_ID:
+            if data[0] != SENSOR_MADGWICK_GAIN_VERSION:
+                return
+            beta_raw = (data[2] << 8) | data[3]
+            with self._telemetry_lock:
+                self._madgwick_beta = (
+                    beta_raw / SENSOR_MADGWICK_BETA_SCALE
+                )
+                self._madgwick_beta_seen = True
+            return
+
         if can_id in (SENSOR_GAIN_X_FB_ID, SENSOR_GAIN_Y_FB_ID):
             axis = "x" if can_id == SENSOR_GAIN_X_FB_ID else "y"
             expected_axis = 0 if axis == "x" else 1
