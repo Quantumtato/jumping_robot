@@ -120,8 +120,8 @@ typedef struct {
 #define ELEC_TO_RAD          (2.0f * (float)M_PI / ELEC_COUNTS_PER_REV)
 
 /* CAN position encoding range — must be large enough to cover the actuator's
- * full travel without clamping.  ±4π = ±2 full mechanical turns. */
-#define POS_MAX_RAD  (4.0f * (float)M_PI)
+ * full travel without clamping.  ±10π = ±5 full mechanical turns (10 turns total). */
+#define POS_MAX_RAD  (10.0f * (float)M_PI)
 
 /* USER CODE END PD */
 
