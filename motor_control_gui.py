@@ -14,7 +14,7 @@ import math
 import collections
 
 # ── Protocol constants (must match STM32 firmware) ────────────────────────────
-P_MIN,  P_MAX  = -math.pi, math.pi   # ±π rad (one full revolution)
+P_MIN,  P_MAX  = -math.pi, math.pi   # legacy ±π range (used by sensor/LQR telemetry)
 V_MIN,  V_MAX  = -1500, 1500
 KP_MIN, KP_MAX =   0.0, 500.0
 KD_MIN, KD_MAX =   0.0, 15.0
@@ -24,6 +24,11 @@ MOTOR_KT       =  0.0095   # Nm/A
 IQMAX_A        = 20.0      # must match IQMAX_A in drive_parameters.h
 TORQUE_MAX_NM  = 0.5       # Nm
 T_MIN,  T_MAX  = -TORQUE_MAX_NM, TORQUE_MAX_NM
+
+# Spring actuator command protocol range (matches spring_actuator firmware)
+SPRING_CMD_P_MIN, SPRING_CMD_P_MAX = -10.0 * math.pi, 10.0 * math.pi
+SPRING_CMD_KP_MIN, SPRING_CMD_KP_MAX = -1.0, 1.0
+SPRING_CMD_T_MIN, SPRING_CMD_T_MAX = -1.0, 1.0
 
 # ── Motor node table  (name → command CAN ID) ─────────────────────────────────
 NODES = {
@@ -117,12 +122,15 @@ def float_to_uint(x, x_min, x_max, bits):
 def uint_to_float(x_int, x_min, x_max, bits):
     return x_min + float(x_int) * (x_max - x_min) / ((1 << bits) - 1)
 
-def pack_command(p, v, kp, kd, t, motor_id=MOTOR_ID):
-    p_int  = float_to_uint(p,  P_MIN,  P_MAX,  16)
+def pack_command(p, v, kp, kd, t, motor_id=MOTOR_ID,
+                 p_min=P_MIN, p_max=P_MAX,
+                 kp_min=KP_MIN, kp_max=KP_MAX,
+                 t_min=T_MIN, t_max=T_MAX):
+    p_int  = float_to_uint(p,  p_min,   p_max,  16)
     v_int  = float_to_uint(v,  V_MIN,  V_MAX,  12)
-    kp_int = float_to_uint(kp, KP_MIN, KP_MAX, 12)
+    kp_int = float_to_uint(kp, kp_min,  kp_max, 12)
     kd_int = float_to_uint(kd, KD_MIN, KD_MAX, 12)
-    t_int  = float_to_uint(t,  T_MIN,  T_MAX,  12)
+    t_int  = float_to_uint(t,  t_min,   t_max,  12)
 
     can_data = bytearray(8)
     can_data[0] = (p_int >> 8) & 0xFF
@@ -241,6 +249,14 @@ class MotorGUI:
         self._feedback_id = self._motor_id + 0x100
         self._ctrl_id    = self._motor_id + 0x200
         self._pos_fb_range = (P_MIN, P_MAX)  # updated per node in _on_motor_change
+        self._torque_fb_range = (T_MIN, T_MAX)  # updated per node in _on_motor_change
+        self._cmd_ranges = {
+            "p": (P_MIN, P_MAX),
+            "v": (V_MIN, V_MAX),
+            "kp": (KP_MIN, KP_MAX),
+            "kd": (KD_MIN, KD_MAX),
+            "t": (T_MIN, T_MAX),
+        }
 
         # Feedback state (written by IO thread, read by UI thread — floats are GIL-safe)
         self.fb_pos   = 0.0
@@ -257,6 +273,8 @@ class MotorGUI:
         self._ctrl_queue = []
         self._ctrl_lock = threading.Lock()
         self._cmd = {"p": 0.0, "v": 0.0, "kp": 0.0, "kd": 0.0, "t": 0.0}
+        self._cmd_sliders = {}
+        self._cmd_entry_vars = {}
         self._sensor_led = {"r": 0, "g": 0, "b": 0}
         self._entry_updating = False  # re-entrancy guard for _entry_commit
         self._io_error = ""
@@ -429,9 +447,11 @@ class MotorGUI:
             slider = ttk.Scale(outer, from_=mn, to=mx, variable=var,
                                orient="horizontal", length=300)
             slider.grid(row=row, column=1, padx=4, pady=3, sticky="ew")
+            self._cmd_sliders[key] = slider
 
             # Numeric entry — bidirectionally linked to the slider
             entry_var = tk.StringVar(value=f"{default:.3f}")
+            self._cmd_entry_vars[key] = entry_var
             entry = tk.Entry(outer, textvariable=entry_var, width=ew,
                              bg=SURFACE, fg=BLUE, insertbackground=BLUE,
                              font=("Consolas", 10), relief="flat",
@@ -451,10 +471,11 @@ class MotorGUI:
             var.trace_add("write", _slider_moved)
 
             # Entry → slider + mirror to thread-safe plain attr
-            def _entry_commit(event, v=var, ev=entry_var, lo=mn, hi=mx, k=key):
+            def _entry_commit(event, v=var, ev=entry_var, k=key):
                 if self._entry_updating:
                     return
                 try:
+                    lo, hi = self._cmd_ranges[k]
                     val = float(ev.get())
                     val = max(lo, min(hi, val))
                     self._entry_updating = True
@@ -469,6 +490,7 @@ class MotorGUI:
             entry.bind("<FocusOut>",  _entry_commit)
 
         outer.columnconfigure(1, weight=1)
+        self._apply_command_profile(self._motor_id)
 
         # Zero / Stop buttons
         btn_row = len(params) + 1
@@ -1005,6 +1027,8 @@ class MotorGUI:
         self._feedback_id = mid + 0x100
         self._ctrl_id     = mid + 0x200
         self._pos_fb_range = (SA_P_MIN, SA_P_MAX) if mid == 0x03 else (P_MIN, P_MAX)
+        self._torque_fb_range = (SPRING_CMD_T_MIN, SPRING_CMD_T_MAX) if mid == 0x03 else (T_MIN, T_MAX)
+        self._apply_command_profile(mid)
         self._set_feedback_profile(self._node_mode)
         controls_state = "normal" if self._node_mode == "motor" else "disabled"
         self._motor_on_btn.config(state=controls_state)
@@ -1012,6 +1036,38 @@ class MotorGUI:
         self._realign_btn.config(state=controls_state)
         self._enable_check.config(state="normal")
         self._log(f"Node → {name}  (mode={self._node_mode} cmd 0x{mid:02X} fb 0x{mid+0x100:03X})")
+
+    def _command_profile_for_node(self, motor_id: int):
+        if motor_id == 0x03:
+            return {
+                "p": (SPRING_CMD_P_MIN, SPRING_CMD_P_MAX),
+                "v": (V_MIN, V_MAX),
+                "kp": (SPRING_CMD_KP_MIN, SPRING_CMD_KP_MAX),
+                "kd": (KD_MIN, KD_MAX),
+                "t": (SPRING_CMD_T_MIN, SPRING_CMD_T_MAX),
+            }
+        return {
+            "p": (P_MIN, P_MAX),
+            "v": (V_MIN, V_MAX),
+            "kp": (KP_MIN, KP_MAX),
+            "kd": (KD_MIN, KD_MAX),
+            "t": (T_MIN, T_MAX),
+        }
+
+    def _apply_command_profile(self, motor_id: int):
+        self._cmd_ranges = self._command_profile_for_node(motor_id)
+        for key, (mn, mx) in self._cmd_ranges.items():
+            slider = self._cmd_sliders.get(key)
+            if slider is not None:
+                slider.configure(from_=mn, to=mx)
+            var = self._slider_vars.get(key)
+            if var is not None:
+                clamped = max(mn, min(mx, var.get()))
+                var.set(clamped)
+                self._cmd[key] = clamped
+            entry_var = self._cmd_entry_vars.get(key)
+            if entry_var is not None and var is not None:
+                entry_var.set(f"{var.get():.3f}")
 
     def _set_feedback_profile(self, mode: str):
         if mode == "sensor":
@@ -1033,7 +1089,7 @@ class MotorGUI:
             self._fb_unit_vars["torq"].set("Nm")
             self._fb_ranges["pos"] = self._pos_fb_range
             self._fb_ranges["vel"] = (V_MIN, V_MAX)
-            self._fb_ranges["torq"] = (T_MIN, T_MAX)
+            self._fb_ranges["torq"] = self._torque_fb_range
 
     def _on_close(self):
         self._disconnect()
@@ -1081,7 +1137,7 @@ class MotorGUI:
     def _parse_lqr_telemetry(self, can_id: int, data: bytes):
         if can_id == SPRING_ACT_FB_ID:
             pos    = uint_to_float((data[2] << 8) | data[3], SA_P_MIN, SA_P_MAX, 16)
-            torque = uint_to_float((data[6] << 8) | data[7], T_MIN,    T_MAX,    16)
+            torque = uint_to_float((data[6] << 8) | data[7], SPRING_CMD_T_MIN, SPRING_CMD_T_MAX, 16)
             with self._telemetry_lock:
                 self._sa_telemetry["pos"]    = pos
                 self._sa_telemetry["torque"] = torque
@@ -1217,8 +1273,14 @@ class MotorGUI:
                     next_periodic_send = t0 + send_interval
                     if self._enabled and self._node_mode == "motor":
                         c = self._cmd
+                        p_min, p_max = self._cmd_ranges["p"]
+                        kp_min, kp_max = self._cmd_ranges["kp"]
+                        t_min, t_max = self._cmd_ranges["t"]
                         self.ser.write(pack_command(c["p"], c["v"], c["kp"], c["kd"], c["t"],
-                                                    self._motor_id))
+                                                    self._motor_id,
+                                                    p_min=p_min, p_max=p_max,
+                                                    kp_min=kp_min, kp_max=kp_max,
+                                                    t_min=t_min, t_max=t_max))
                         self.tx_count += 1
                     elif self._enabled and self._node_mode == "sensor":
                         s = self._sensor_led
@@ -1247,7 +1309,8 @@ class MotorGUI:
                             if self._node_mode == "sensor":
                                 self.fb_torq = float((d[6] << 8) | d[7])
                             else:
-                                self.fb_torq = uint_to_float((d[6] << 8) | d[7], T_MIN, T_MAX, 16)
+                                t_lo, t_hi = self._torque_fb_range
+                                self.fb_torq = uint_to_float((d[6] << 8) | d[7], t_lo, t_hi, 16)
                             self.fb_count += 1
                     else:
                         del self._rx_buf[0]

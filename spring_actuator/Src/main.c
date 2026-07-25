@@ -122,6 +122,10 @@ typedef struct {
 /* CAN position encoding range — must be large enough to cover the actuator's
  * full travel without clamping.  ±10π = ±5 full mechanical turns (10 turns total). */
 #define POS_MAX_RAD  (10.0f * (float)M_PI)
+#define CAN_KP_MIN   (-1.0f)
+#define CAN_KP_MAX   (1.0f)
+#define CAN_T_MIN    (-1.0f)
+#define CAN_T_MAX    (1.0f)
 
 /* USER CODE END PD */
 
@@ -1536,9 +1540,9 @@ void CAN_Unpack_Command(const uint8_t *data, CAN_Command_t *cmd)
 {
     const float P_MIN = -POS_MAX_RAD,      P_MAX = POS_MAX_RAD;
     const float V_MIN = -1500.0f,      V_MAX = 1500.0f;
-    const float KP_MIN = 0.0f,         KP_MAX = 500.0f;
+    const float KP_MIN = CAN_KP_MIN,   KP_MAX = CAN_KP_MAX;
     const float KD_MIN = 0.0f,         KD_MAX = 15.0f;
-    const float TRQ_MIN = -TORQUE_MAX_NM, TRQ_MAX = TORQUE_MAX_NM;
+    const float TRQ_MIN = CAN_T_MIN,   TRQ_MAX = CAN_T_MAX;
 
     uint16_t p_int  = ((uint16_t)data[0] << 8) | data[1];
     uint16_t v_int  = ((uint16_t)data[2] << 4) | (data[3] >> 4);
@@ -1557,7 +1561,7 @@ void CAN_Pack_Feedback(uint8_t *data, const CAN_Feedback_t *fb)
 {
     const float P_MIN = -POS_MAX_RAD,       P_MAX = POS_MAX_RAD;
     const float V_MIN = -1500.0f,       V_MAX = 1500.0f;
-    const float TRQ_MIN = -TORQUE_MAX_NM, TRQ_MAX = TORQUE_MAX_NM;
+    const float TRQ_MIN = CAN_T_MIN,    TRQ_MAX = CAN_T_MAX;
 
     uint16_t p_int = (uint16_t)Math_Map_Float_To_Int(fb->position_actual, P_MIN, P_MAX, 16);
     uint16_t v_int = (uint16_t)Math_Map_Float_To_Int(fb->velocity_actual, V_MIN, V_MAX, 16);
