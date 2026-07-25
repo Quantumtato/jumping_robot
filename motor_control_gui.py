@@ -59,6 +59,9 @@ FLYWHEEL_X_FB_ID = 0x101
 FLYWHEEL_Y_FB_ID = 0x102
 FLYWHEEL_X_CMD_ID = 0x001
 FLYWHEEL_Y_CMD_ID = 0x002
+SPRING_ACT_FB_ID  = 0x103
+SA_P_MIN = -10.0 * math.pi   # must match POS_MAX_RAD in spring_actuator firmware
+SA_P_MAX =  10.0 * math.pi
 LQR_T_MIN, LQR_T_MAX = -1.0, 1.0
 PLOT_HISTORY = 400
 
@@ -237,6 +240,7 @@ class MotorGUI:
         self._motor_id   = 0x02
         self._feedback_id = self._motor_id + 0x100
         self._ctrl_id    = self._motor_id + 0x200
+        self._pos_fb_range = (P_MIN, P_MAX)  # updated per node in _on_motor_change
 
         # Feedback state (written by IO thread, read by UI thread — floats are GIL-safe)
         self.fb_pos   = 0.0
@@ -270,6 +274,7 @@ class MotorGUI:
                   "accel_valid": False, "gyro_rejected": False, "resync_count": None,
                   "state": 0, "error": 0, "sensor_seen": False, "motor_seen": False},
         }
+        self._sa_telemetry = {"pos": 0.0, "torque": 0.0, "seen": False}
         self._plot_history = {
             "x": {"angle": collections.deque(maxlen=PLOT_HISTORY),
                   "accel_angle": collections.deque(maxlen=PLOT_HISTORY),
@@ -277,6 +282,8 @@ class MotorGUI:
             "y": {"angle": collections.deque(maxlen=PLOT_HISTORY),
                   "accel_angle": collections.deque(maxlen=PLOT_HISTORY),
                   "command": collections.deque(maxlen=PLOT_HISTORY)},
+            "spring_act": {"pos": collections.deque(maxlen=PLOT_HISTORY),
+                           "torque": collections.deque(maxlen=PLOT_HISTORY)},
         }
         self._lqr_window = None
         self._lqr_axis_var = None
@@ -378,8 +385,8 @@ class MotorGUI:
         self._motor_off_btn.pack(side="left", padx=2)
         self._realign_btn = ttk.Button(f, text="Re-Align",  command=self._force_align, width=10)
         self._realign_btn.pack(side="left", padx=2)
-        ttk.Button(f, text="LQR Monitor", command=self._open_lqr_monitor,
-                   width=12).pack(side="left", padx=(8, 2))
+        ttk.Button(f, text="Control Monitor", command=self._open_lqr_monitor,
+                   width=14).pack(side="left", padx=(8, 2))
 
         # State badge — updates from feedback
         self._state_var = tk.StringVar(value="STATE: --")
@@ -603,7 +610,7 @@ class MotorGUI:
             return
 
         win = tk.Toplevel(self.root)
-        win.title("LQR Telemetry")
+        win.title("Control Monitor")
         win.configure(bg=BG)
         win.geometry("1040x760")
         self._lqr_window = win
@@ -611,10 +618,10 @@ class MotorGUI:
 
         header = tk.Frame(win, bg=BG)
         header.pack(fill="x", padx=12, pady=10)
-        tk.Label(header, text="Axis:", bg=BG, fg=MUTED,
+        tk.Label(header, text="View:", bg=BG, fg=MUTED,
                  font=("Consolas", 10)).pack(side="left")
-        for axis in ("x", "y"):
-            tk.Radiobutton(header, text=axis.upper(), value=axis,
+        for axis, label in (("x", "X"), ("y", "Y"), ("spring_act", "SPRING")):
+            tk.Radiobutton(header, text=label, value=axis,
                            variable=self._lqr_axis_var, bg=BG, fg=TEXT,
                            selectcolor=SURFACE, activebackground=BG,
                            activeforeground=TEXT, font=("Consolas", 10, "bold")).pack(
@@ -796,6 +803,7 @@ class MotorGUI:
 
         with self._telemetry_lock:
             snapshot = {axis: values.copy() for axis, values in self._telemetry.items()}
+            sa_snap = self._sa_telemetry.copy()
             madgwick_beta = self._madgwick_beta
             madgwick_beta_seen = self._madgwick_beta_seen
 
@@ -821,6 +829,10 @@ class MotorGUI:
                 else:
                     gain_var.set("waiting for CAN")
 
+        if sa_snap["seen"]:
+            self._plot_history["spring_act"]["pos"].append(sa_snap["pos"])
+            self._plot_history["spring_act"]["torque"].append(sa_snap["torque"])
+
         axis = self._lqr_axis_var.get()
         if self._madgwick_beta_readback_var is not None:
             if madgwick_beta_seen:
@@ -829,20 +841,32 @@ class MotorGUI:
                 )
             else:
                 self._madgwick_beta_readback_var.set("waiting for CAN")
-        self._draw_trace(self._lqr_angle_canvas,
-                         self._plot_history[axis]["angle"],
-                         f"{axis.upper()} angle: Madgwick estimate vs filtered accel",
-                         "rad",
-                         BLUE,
-                         self._plot_history[axis]["accel_angle"],
-                         GREEN)
-        self._draw_trace(self._lqr_command_canvas,
-                         self._plot_history[axis]["command"],
-                         f"{axis.upper()} torque command", "Nm", YELLOW)
+
+        if axis == "spring_act":
+            self._draw_trace(self._lqr_angle_canvas,
+                             self._plot_history["spring_act"]["pos"],
+                             "Spring Actuator Position", "rad", BLUE,
+                             primary_label="position")
+            self._draw_trace(self._lqr_command_canvas,
+                             self._plot_history["spring_act"]["torque"],
+                             "Spring Actuator Torque (actual)", "Nm", YELLOW,
+                             primary_label="torque")
+        else:
+            self._draw_trace(self._lqr_angle_canvas,
+                             self._plot_history[axis]["angle"],
+                             f"{axis.upper()} angle: Madgwick estimate vs filtered accel",
+                             "rad",
+                             BLUE,
+                             self._plot_history[axis]["accel_angle"],
+                             GREEN)
+            self._draw_trace(self._lqr_command_canvas,
+                             self._plot_history[axis]["command"],
+                             f"{axis.upper()} torque command", "Nm", YELLOW)
 
     @staticmethod
     def _draw_trace(canvas: tk.Canvas, values, title: str, unit: str, color: str,
-                    secondary_values=None, secondary_color=GREEN):
+                    secondary_values=None, secondary_color=GREEN,
+                    primary_label="Madgwick", secondary_label="accel"):
         canvas.update_idletasks()
         width = canvas.winfo_width()
         height = canvas.winfo_height()
@@ -903,11 +927,11 @@ class MotorGUI:
         draw_samples(samples, color)
         draw_samples(secondary_samples, secondary_color)
         if samples:
-            canvas.create_text(width - 12, 8, text=f"Madgwick {samples[-1]:+.4f} {unit}",
+            canvas.create_text(width - 12, 8, text=f"{primary_label} {samples[-1]:+.4f} {unit}",
                                fill=color, anchor="ne", font=("Consolas", 10, "bold"))
         if secondary_samples:
             canvas.create_text(width - 12, 24,
-                               text=f"accel {secondary_samples[-1]:+.4f} {unit}",
+                               text=f"{secondary_label} {secondary_samples[-1]:+.4f} {unit}",
                                fill=secondary_color, anchor="ne",
                                font=("Consolas", 10, "bold"))
 
@@ -980,6 +1004,7 @@ class MotorGUI:
         self._motor_id    = mid
         self._feedback_id = mid + 0x100
         self._ctrl_id     = mid + 0x200
+        self._pos_fb_range = (SA_P_MIN, SA_P_MAX) if mid == 0x03 else (P_MIN, P_MAX)
         self._set_feedback_profile(self._node_mode)
         controls_state = "normal" if self._node_mode == "motor" else "disabled"
         self._motor_on_btn.config(state=controls_state)
@@ -1006,7 +1031,7 @@ class MotorGUI:
             self._fb_unit_vars["pos"].set("rad")
             self._fb_unit_vars["vel"].set("rad/s")
             self._fb_unit_vars["torq"].set("Nm")
-            self._fb_ranges["pos"] = (P_MIN, P_MAX)
+            self._fb_ranges["pos"] = self._pos_fb_range
             self._fb_ranges["vel"] = (V_MIN, V_MAX)
             self._fb_ranges["torq"] = (T_MIN, T_MAX)
 
@@ -1054,6 +1079,15 @@ class MotorGUI:
         self._log_var.set(msg)
 
     def _parse_lqr_telemetry(self, can_id: int, data: bytes):
+        if can_id == SPRING_ACT_FB_ID:
+            pos    = uint_to_float((data[2] << 8) | data[3], SA_P_MIN, SA_P_MAX, 16)
+            torque = uint_to_float((data[6] << 8) | data[7], T_MIN,    T_MAX,    16)
+            with self._telemetry_lock:
+                self._sa_telemetry["pos"]    = pos
+                self._sa_telemetry["torque"] = torque
+                self._sa_telemetry["seen"]   = True
+            return
+
         if can_id == SENSOR_MADGWICK_GAIN_FB_ID:
             if data[0] != SENSOR_MADGWICK_GAIN_VERSION:
                 return
@@ -1207,7 +1241,8 @@ class MotorGUI:
                             self.fb_id    = d[0] & 0x0F          # lower nibble = motor ID
                             self.fb_state = (d[0] >> 4) & 0x0F   # upper nibble = state code
                             self.fb_err   = d[1]
-                            self.fb_pos   = uint_to_float((d[2] << 8) | d[3], P_MIN, P_MAX, 16)
+                            p_lo, p_hi = self._pos_fb_range
+                            self.fb_pos   = uint_to_float((d[2] << 8) | d[3], p_lo, p_hi, 16)
                             self.fb_vel   = uint_to_float((d[4] << 8) | d[5], V_MIN, V_MAX, 16)
                             if self._node_mode == "sensor":
                                 self.fb_torq = float((d[6] << 8) | d[7])
