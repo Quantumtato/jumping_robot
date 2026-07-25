@@ -110,6 +110,19 @@ typedef struct {
 #define M_PI            3.14159265f
 #endif
 
+/* ---- Multi-turn position -----------------------------------------------
+ * The MA732 reads directly off the motor magnets, so it sees one electrical
+ * revolution (16384 counts) per pole pair, not per mechanical turn.
+ * One full mechanical revolution = MA732_COUNTS_PER_TURN * MOTOR_POLE_PAIRS.
+ * ELEC_TO_RAD converts the raw accumulated electrical count to mechanical
+ * radians (2π per full mechanical turn). */
+#define ELEC_COUNTS_PER_REV  ((float)MA732_COUNTS_PER_TURN * (float)MOTOR_POLE_PAIRS)
+#define ELEC_TO_RAD          (2.0f * (float)M_PI / ELEC_COUNTS_PER_REV)
+
+/* CAN position encoding range — must be large enough to cover the actuator's
+ * full travel without clamping.  ±4π = ±2 full mechanical turns. */
+#define POS_MAX_RAD  (4.0f * (float)M_PI)
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -1464,10 +1477,12 @@ void ENC_SetMecAngle(ENCODER_Handle_t *pHandle, int16_t hMecAngle)
   ma732_cache_valid = 1U;
   ma732_last_raw14_for_pos = raw14_now;
   ma732_pos_initialized = 1U;
-  ma732_elec_accum_counts = (int32_t)target_el_counts;
+  /* Zero the multi-turn accumulator: alignment defines the zero position. */
+  ma732_elec_accum_counts = 0;
   pHandle->PreviousCapture = (uint32_t)raw14_now;
   pHandle->_Super.hMecAngle = hMecAngle;
   pHandle->_Super.hElAngle = (int16_t)(hMecAngle * (int16_t)pp);
+  pHandle->_Super.wMecAngle = 0;
   __enable_irq();
 }
 
@@ -1482,7 +1497,7 @@ void MC_APP_PostMediumFrequencyHook_M1(void)
     if (!can_active)
         return;  /* don't fight motor profiler before first CAN command */
 
-    float pos_actual = (float)ENCODER_M1._Super.hMecAngle * S16_TO_RADIANS;
+    float pos_actual = (float)ma732_elec_accum_counts * ELEC_TO_RAD;
     float vel_actual = ENCODER_VEL_SIGN * MC_GetAverageMecSpeedMotor1_F() * RPM_TO_RADS;
 
     float tau = ImpedanceCtrl.kp * (ImpedanceCtrl.position_target - pos_actual)
@@ -1519,7 +1534,7 @@ int Math_Map_Float_To_Int(float x, float x_min, float x_max, int bits)
 
 void CAN_Unpack_Command(const uint8_t *data, CAN_Command_t *cmd)
 {
-    const float P_MIN = -(float)M_PI,  P_MAX = (float)M_PI;
+    const float P_MIN = -POS_MAX_RAD,      P_MAX = POS_MAX_RAD;
     const float V_MIN = -1500.0f,      V_MAX = 1500.0f;
     const float KP_MIN = 0.0f,         KP_MAX = 500.0f;
     const float KD_MIN = 0.0f,         KD_MAX = 15.0f;
@@ -1540,7 +1555,7 @@ void CAN_Unpack_Command(const uint8_t *data, CAN_Command_t *cmd)
 
 void CAN_Pack_Feedback(uint8_t *data, const CAN_Feedback_t *fb)
 {
-    const float P_MIN = -(float)M_PI,   P_MAX = (float)M_PI;
+    const float P_MIN = -POS_MAX_RAD,       P_MAX = POS_MAX_RAD;
     const float V_MIN = -1500.0f,       V_MAX = 1500.0f;
     const float TRQ_MIN = -TORQUE_MAX_NM, TRQ_MAX = TORQUE_MAX_NM;
 
@@ -1676,7 +1691,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     {
         CurrentState.motor_id       = MY_MOTOR_ID;
         CurrentState.error_code     = (uint8_t)(MC_GetOccurredFaultsMotor1() & 0xFFu);
-        CurrentState.position_actual = (float)ENCODER_M1._Super.hMecAngle * S16_TO_RADIANS;
+        CurrentState.position_actual = (float)ma732_elec_accum_counts * ELEC_TO_RAD;
         CurrentState.velocity_actual = MC_GetAverageMecSpeedMotor1_F() * RPM_TO_RADS;
         qd_f_t iqd = MC_GetIqdMotor1_F();
         CurrentState.torque_actual  = iqd.q * MOTOR_KT;
