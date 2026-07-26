@@ -83,6 +83,7 @@ typedef struct {
 #define SENSOR_LED_COUNT         4U
 #define SENSOR_LED_TEST_CYCLE_ENABLE 1U
 #define SENSOR_LED_TEST_PERIOD_MS   250U
+#define TOF_ENABLE                    0U
 #define UART_DEBUG_ENABLE             0U
 #define UART_PERIODIC_DEBUG_ENABLE    0U
 #define WS2812_BITS_PER_LED      24U
@@ -110,32 +111,32 @@ typedef struct {
 #define CAN_FB_TRQ_MIN        -1.0f
 #define CAN_FB_TRQ_MAX         1.0f
 
-#define LQR_X_K_THETA              48.3391f
+#define LQR_X_K_THETA              -130.0f
 #define LQR_X_K_THETA_DOT           0.0f
-#define LQR_X_K_FLYWHEEL_SPEED     -0.2236f
-#define LQR_Y_K_THETA              48.3391f
+#define LQR_X_K_FLYWHEEL_SPEED     0.04f
+#define LQR_Y_K_THETA              -130.0f
 #define LQR_Y_K_THETA_DOT           0.0f
-#define LQR_Y_K_FLYWHEEL_SPEED     -0.2236f
+#define LQR_Y_K_FLYWHEEL_SPEED     0.04f
 #define LQR_GAIN_THETA_SCALE       100.0f
 #define LQR_GAIN_RATE_SCALE       1000.0f
 #define LQR_GAIN_WHEEL_SCALE     10000.0f
 #define LQR_TORQUE_LIMIT      0.4f
 #define LQR_THETA_SETPOINT_X  0.0f
 #define LQR_THETA_SETPOINT_Y  0.0f
-#define ACCEL_RAW_MAG_LO          0.92f
-#define ACCEL_RAW_MAG_HI          1.08f
-#define ACCEL_FILTERED_MAG_LO     0.98f
-#define ACCEL_FILTERED_MAG_HI     1.02f
-#define ACCEL_LPF_TAU_S           0.12f
-#define ACCEL_RATE_LIMIT_RAD_S    0.75f
-#define ACCEL_VALID_SAMPLES       40U
+#define ACCEL_FILTERED_MAG_FULL_LO    0.94f
+#define ACCEL_FILTERED_MAG_FULL_HI    1.06f
+#define ACCEL_FILTERED_MAG_REJECT_LO  0.85f
+#define ACCEL_FILTERED_MAG_REJECT_HI  1.15f
+#define ACCEL_LPF_TAU_S               0.12f
+#define ACCEL_RATE_FULL_RAD_S          0.75f
+#define ACCEL_RATE_REDUCED_RAD_S       3.0f
+#define ACCEL_RATE_MIN_WEIGHT          0.20f
+#define ACCEL_CONFIDENCE_RISE_TAU_S    0.25f
+#define ACCEL_CONFIDENCE_FALL_TAU_S    0.10f
+#define ACCEL_CONFIDENCE_VALID_MIN     0.05f
 #define MADGWICK_BETA              0.25f
 #define MADGWICK_BETA_SCALE     10000.0f
 #define MADGWICK_BETA_MAX           2.0f
-#define GYRO_MAX_BODY_RATE_RAD_S  12.0f
-#define GYRO_MAX_SLEW_RAD_S2     400.0f
-#define GYRO_SLEW_MARGIN_RAD_S     0.05f
-#define GYRO_RESEED_SAMPLES         3U
 #define GYRO_RECOVERY_SAMPLES      20U
 
 #define VL53L4CD_I2C_ADDR                 (0x29U << 1)
@@ -198,19 +199,8 @@ static float    accel_lpf_y_g = 0.0f;
 static float    accel_lpf_z_g = 1.0f;
 static float    accel_angle_x = 0.0f;
 static float    accel_angle_y = 0.0f;
-static uint16_t accel_valid_count = 0U;
+static float    accel_confidence = 1.0f;
 static uint8_t  accel_angles_valid = 0U;
-static float    gyro_history_x[2] = {0.0f, 0.0f};
-static float    gyro_history_y[2] = {0.0f, 0.0f};
-static float    gyro_history_z[2] = {0.0f, 0.0f};
-static float    gyro_accepted_x = 0.0f;
-static float    gyro_accepted_y = 0.0f;
-static float    gyro_accepted_z = 0.0f;
-static float    gyro_reseed_x = 0.0f;
-static float    gyro_reseed_y = 0.0f;
-static float    gyro_reseed_z = 0.0f;
-static uint8_t  gyro_history_count = 0U;
-static uint8_t  gyro_reseed_count = 0U;
 static uint8_t  gyro_reject_latched = 0U;
 static uint8_t  gyro_recovery_count = 0U;
 static uint8_t  imu_config_valid = 0U;
@@ -273,15 +263,10 @@ static uint16_t can_map_float_to_u16(float x, float x_min, float x_max);
 static int      can_map_float_to_int(float x, float x_min, float x_max, int bits);
 static float    can_map_u16_to_float(uint16_t x, float x_min, float x_max);
 static float    wrap_to_pi(float angle);
-static float    median_of_three(float a, float b, float c);
-static uint8_t  gyro_filter_update(float raw_x, float raw_y, float raw_z,
-                                   float dt, uint8_t sample_valid,
-                                   float *filtered_x, float *filtered_y,
-                                   float *filtered_z);
 static void     madgwick_set_tilt(float roll, float pitch);
 static void     madgwick_update_imu(float gx, float gy, float gz,
                                     float ax, float ay, float az,
-                                    float dt, uint8_t use_accel, float beta);
+                                    float dt, float accel_weight, float beta);
 static void     madgwick_get_attitude(float *roll, float *pitch, float *yaw);
 static void     can_pack_command(uint8_t *data, const CAN_Command_t *cmd);
 static void     can_unpack_motor_feedback(const uint8_t *data, CAN_MotorFeedback_t *fb);
@@ -389,109 +374,6 @@ static float wrap_to_pi(float angle)
   return angle;
 }
 
-static float median_of_three(float a, float b, float c)
-{
-  if (a > b)
-  {
-    float tmp = a;
-    a = b;
-    b = tmp;
-  }
-  if (b > c)
-  {
-    b = c;
-  }
-  return (a > b) ? a : b;
-}
-
-static uint8_t gyro_filter_update(float raw_x, float raw_y, float raw_z,
-                                  float dt, uint8_t sample_valid,
-                                  float *filtered_x, float *filtered_y,
-                                  float *filtered_z)
-{
-  float gate_dt = (dt >= 0.0005f) ? dt : 0.001f;
-  float max_delta = GYRO_MAX_SLEW_RAD_S2 * gate_dt + GYRO_SLEW_MARGIN_RAD_S;
-
-  if (sample_valid == 0U ||
-      fabsf(raw_x) > GYRO_MAX_BODY_RATE_RAD_S ||
-      fabsf(raw_y) > GYRO_MAX_BODY_RATE_RAD_S ||
-      fabsf(raw_z) > GYRO_MAX_BODY_RATE_RAD_S)
-  {
-    *filtered_x = 0.0f;
-    *filtered_y = 0.0f;
-    *filtered_z = 0.0f;
-    gyro_reseed_count = 0U;
-    gyro_reject_latched = 1U;
-    return 0U;
-  }
-
-  if (gyro_history_count != 0U &&
-      (fabsf(raw_x - gyro_history_x[gyro_history_count - 1U]) > max_delta ||
-       fabsf(raw_y - gyro_history_y[gyro_history_count - 1U]) > max_delta ||
-       fabsf(raw_z - gyro_history_z[gyro_history_count - 1U]) > max_delta))
-  {
-    if (gyro_reseed_count == 0U ||
-        fabsf(raw_x - gyro_reseed_x) > max_delta ||
-        fabsf(raw_y - gyro_reseed_y) > max_delta ||
-        fabsf(raw_z - gyro_reseed_z) > max_delta)
-    {
-      gyro_reseed_count = 1U;
-    }
-    else if (gyro_reseed_count < GYRO_RESEED_SAMPLES)
-    {
-      gyro_reseed_count++;
-    }
-
-    gyro_reseed_x = raw_x;
-    gyro_reseed_y = raw_y;
-    gyro_reseed_z = raw_z;
-    gyro_reject_latched = 1U;
-
-    if (gyro_reseed_count < GYRO_RESEED_SAMPLES)
-    {
-      *filtered_x = 0.0f;
-      *filtered_y = 0.0f;
-      *filtered_z = 0.0f;
-      return 0U;
-    }
-
-    gyro_history_count = 0U;
-    gyro_reseed_count = 0U;
-  }
-  else
-  {
-    gyro_reseed_count = 0U;
-  }
-
-  if (gyro_history_count < 2U)
-  {
-    gyro_history_x[gyro_history_count] = raw_x;
-    gyro_history_y[gyro_history_count] = raw_y;
-    gyro_history_z[gyro_history_count] = raw_z;
-    gyro_history_count++;
-    gyro_accepted_x = raw_x;
-    gyro_accepted_y = raw_y;
-    gyro_accepted_z = raw_z;
-  }
-  else
-  {
-    gyro_accepted_x = median_of_three(gyro_history_x[0], gyro_history_x[1], raw_x);
-    gyro_accepted_y = median_of_three(gyro_history_y[0], gyro_history_y[1], raw_y);
-    gyro_accepted_z = median_of_three(gyro_history_z[0], gyro_history_z[1], raw_z);
-    gyro_history_x[0] = gyro_history_x[1];
-    gyro_history_y[0] = gyro_history_y[1];
-    gyro_history_z[0] = gyro_history_z[1];
-    gyro_history_x[1] = raw_x;
-    gyro_history_y[1] = raw_y;
-    gyro_history_z[1] = raw_z;
-  }
-
-  *filtered_x = gyro_accepted_x;
-  *filtered_y = gyro_accepted_y;
-  *filtered_z = gyro_accepted_z;
-  return 1U;
-}
-
 static void madgwick_set_tilt(float roll, float pitch)
 {
   float yaw = atan2f(2.0f * (attitude_q_w * attitude_q_z +
@@ -516,7 +398,7 @@ static void madgwick_set_tilt(float roll, float pitch)
 
 static void madgwick_update_imu(float gx, float gy, float gz,
                                 float ax, float ay, float az,
-                                float dt, uint8_t use_accel, float beta)
+                                float dt, float accel_weight, float beta)
 {
   float qw = attitude_q_w;
   float qx = attitude_q_x;
@@ -527,7 +409,7 @@ static void madgwick_update_imu(float gx, float gy, float gz,
   float q_dot_y = 0.5f * ( qw * gy - qx * gz + qz * gx);
   float q_dot_z = 0.5f * ( qw * gz + qx * gy - qy * gx);
 
-  if (use_accel != 0U)
+  if (accel_weight > 0.0f)
   {
     float accel_norm_sq = ax * ax + ay * ay + az * az;
     if (accel_norm_sq > 0.0f)
@@ -588,10 +470,11 @@ static void madgwick_update_imu(float gx, float gy, float gz,
       if (step_norm_sq > 0.0f)
       {
         inv_step_norm = 1.0f / sqrtf(step_norm_sq);
-        q_dot_w -= beta * s_w * inv_step_norm;
-        q_dot_x -= beta * s_x * inv_step_norm;
-        q_dot_y -= beta * s_y * inv_step_norm;
-        q_dot_z -= beta * s_z * inv_step_norm;
+        float weighted_beta = beta * accel_weight;
+        q_dot_w -= weighted_beta * s_w * inv_step_norm;
+        q_dot_x -= weighted_beta * s_x * inv_step_norm;
+        q_dot_y -= weighted_beta * s_y * inv_step_norm;
+        q_dot_z -= weighted_beta * s_z * inv_step_norm;
       }
     }
   }
@@ -1347,7 +1230,7 @@ int main(void)
     imu_config_status |= ism330dhcx_gy_full_scale_set(&imu_ctx, ISM330DHCX_2000dps);
     imu_config_status |= ism330dhcx_block_data_update_set(&imu_ctx, PROPERTY_ENABLE);
     imu_config_status |= ism330dhcx_gy_filter_lp1_set(&imu_ctx, PROPERTY_ENABLE);
-    imu_config_status |= ism330dhcx_gy_lp1_bandwidth_set(&imu_ctx, ISM330DHCX_MEDIUM);
+    imu_config_status |= ism330dhcx_gy_lp1_bandwidth_set(&imu_ctx, ISM330DHCX_STRONG);
     if (imu_config_status != 0)
     {
       sensor_error_code |= SENSOR_ERROR_IMU_DATA;
@@ -1380,7 +1263,13 @@ int main(void)
 
   uart_print("FDCAN started.\r\n");
 
-  if (tof_init() == HAL_OK)
+  if (TOF_ENABLE == 0U)
+  {
+    tof_distance_mm = 0U;
+    sensor_error_code &= (uint8_t)~(SENSOR_ERROR_TOF_INIT | SENSOR_ERROR_TOF_DATA);
+    uart_print("VL53L4CD disabled.\r\n");
+  }
+  else if (tof_init() == HAL_OK)
   {
     sensor_error_code &= (uint8_t)~(SENSOR_ERROR_TOF_INIT | SENSOR_ERROR_TOF_DATA);
     uart_print("VL53L4CD OK.\r\n");
@@ -1433,8 +1322,7 @@ int main(void)
     int16_t raw_gyro[3] = {0};
     int32_t accel_read_status = ism330dhcx_acceleration_raw_get(&imu_ctx, raw_accel);
     int32_t gyro_read_status = ism330dhcx_angular_rate_raw_get(&imu_ctx, raw_gyro);
-    uint8_t imu_sample_valid =
-        (accel_read_status == 0 && gyro_read_status == 0) ? 1U : 0U;
+    uint8_t accel_sample_valid = (accel_read_status == 0) ? 1U : 0U;
 
     float ax = ism330dhcx_from_fs4g_to_mg(raw_accel[0]);
     float ay = ism330dhcx_from_fs4g_to_mg(raw_accel[1]);
@@ -1474,17 +1362,10 @@ int main(void)
     float gx_raw_rads = -gx * (1.0f / 1000.0f) * (3.14159265f / 180.0f);
     float gy_raw_rads = -gy * (1.0f / 1000.0f) * (3.14159265f / 180.0f);
     float gz_raw_rads =  gz * (1.0f / 1000.0f) * (3.14159265f / 180.0f);
-    float gx_rads;
-    float gy_rads;
-    float gz_rads;
-    uint8_t gyro_sample_valid = gyro_filter_update(gx_raw_rads,
-                                                    gy_raw_rads,
-                                                    gz_raw_rads,
-                                                    dt,
-                                                    imu_sample_valid,
-                                                    &gx_rads,
-                                                    &gy_rads,
-                                                    &gz_rads);
+    uint8_t gyro_sample_valid = (gyro_read_status == 0) ? 1U : 0U;
+    float gx_rads = (gyro_sample_valid != 0U) ? gx_raw_rads : 0.0f;
+    float gy_rads = (gyro_sample_valid != 0U) ? gy_raw_rads : 0.0f;
+    float gz_rads = (gyro_sample_valid != 0U) ? gz_raw_rads : 0.0f;
     if (gyro_sample_valid != 0U)
     {
       if (gyro_recovery_count < GYRO_RECOVERY_SAMPLES)
@@ -1500,6 +1381,7 @@ int main(void)
     else
     {
       gyro_recovery_count = 0U;
+      gyro_reject_latched = 1U;
       sensor_error_code |= SENSOR_ERROR_IMU_DATA;
     }
 
@@ -1507,28 +1389,76 @@ int main(void)
       float ax_g = ax * 0.001f;
       float ay_g = ay * 0.001f;
       float az_g = az * 0.001f;
-      float raw_mag = sqrtf(ax_g * ax_g + ay_g * ay_g + az_g * az_g);
       float lpf_alpha = (dt > 0.0f) ? (dt / (ACCEL_LPF_TAU_S + dt)) : 0.0f;
-      accel_lpf_x_g += lpf_alpha * (ax_g - accel_lpf_x_g);
-      accel_lpf_y_g += lpf_alpha * (ay_g - accel_lpf_y_g);
-      accel_lpf_z_g += lpf_alpha * (az_g - accel_lpf_z_g);
+      if (accel_sample_valid != 0U)
+      {
+        accel_lpf_x_g += lpf_alpha * (ax_g - accel_lpf_x_g);
+        accel_lpf_y_g += lpf_alpha * (ay_g - accel_lpf_y_g);
+        accel_lpf_z_g += lpf_alpha * (az_g - accel_lpf_z_g);
+      }
 
       float filtered_mag = sqrtf(accel_lpf_x_g * accel_lpf_x_g +
                                  accel_lpf_y_g * accel_lpf_y_g +
                                  accel_lpf_z_g * accel_lpf_z_g);
-      if (imu_sample_valid != 0U &&
-          raw_mag >= ACCEL_RAW_MAG_LO && raw_mag <= ACCEL_RAW_MAG_HI &&
-          filtered_mag >= ACCEL_FILTERED_MAG_LO &&
-          filtered_mag <= ACCEL_FILTERED_MAG_HI)
+      /* Preserve some gravity correction through vibration, but fade it out
+       * when filtered magnitude indicates sustained linear acceleration. */
+      float magnitude_weight;
+      if (accel_sample_valid == 0U ||
+          filtered_mag <= ACCEL_FILTERED_MAG_REJECT_LO ||
+          filtered_mag >= ACCEL_FILTERED_MAG_REJECT_HI)
       {
-        if (accel_valid_count < ACCEL_VALID_SAMPLES)
-        {
-          accel_valid_count++;
-        }
+        magnitude_weight = 0.0f;
+      }
+      else if (filtered_mag < ACCEL_FILTERED_MAG_FULL_LO)
+      {
+        magnitude_weight =
+            (filtered_mag - ACCEL_FILTERED_MAG_REJECT_LO) /
+            (ACCEL_FILTERED_MAG_FULL_LO - ACCEL_FILTERED_MAG_REJECT_LO);
+      }
+      else if (filtered_mag > ACCEL_FILTERED_MAG_FULL_HI)
+      {
+        magnitude_weight =
+            (ACCEL_FILTERED_MAG_REJECT_HI - filtered_mag) /
+            (ACCEL_FILTERED_MAG_REJECT_HI - ACCEL_FILTERED_MAG_FULL_HI);
       }
       else
       {
-        accel_valid_count = 0U;
+        magnitude_weight = 1.0f;
+      }
+
+      float body_rate = fmaxf(fabsf(gx_rads), fabsf(gy_rads));
+      float rate_weight;
+      if (body_rate <= ACCEL_RATE_FULL_RAD_S)
+      {
+        rate_weight = 1.0f;
+      }
+      else if (body_rate >= ACCEL_RATE_REDUCED_RAD_S)
+      {
+        rate_weight = ACCEL_RATE_MIN_WEIGHT;
+      }
+      else
+      {
+        float rate_fraction =
+            (body_rate - ACCEL_RATE_FULL_RAD_S) /
+            (ACCEL_RATE_REDUCED_RAD_S - ACCEL_RATE_FULL_RAD_S);
+        rate_weight = 1.0f -
+            rate_fraction * (1.0f - ACCEL_RATE_MIN_WEIGHT);
+      }
+
+      float confidence_target = magnitude_weight * rate_weight;
+      float confidence_tau = (confidence_target > accel_confidence) ?
+          ACCEL_CONFIDENCE_RISE_TAU_S : ACCEL_CONFIDENCE_FALL_TAU_S;
+      float confidence_alpha =
+          (dt > 0.0f) ? (dt / (confidence_tau + dt)) : 0.0f;
+      accel_confidence +=
+          confidence_alpha * (confidence_target - accel_confidence);
+      if (accel_confidence < 0.0f)
+      {
+        accel_confidence = 0.0f;
+      }
+      else if (accel_confidence > 1.0f)
+      {
+        accel_confidence = 1.0f;
       }
 
       accel_angle_x = atan2f(-accel_lpf_y_g, accel_lpf_z_g);
@@ -1538,9 +1468,10 @@ int main(void)
     }
 
     accel_angles_valid =
-        (accel_valid_count >= ACCEL_VALID_SAMPLES &&
-         fabsf(gx_rads) <= ACCEL_RATE_LIMIT_RAD_S &&
-         fabsf(gy_rads) <= ACCEL_RATE_LIMIT_RAD_S) ? 1U : 0U;
+        (accel_sample_valid != 0U &&
+         accel_confidence >= ACCEL_CONFIDENCE_VALID_MIN) ? 1U : 0U;
+    float accel_correction_weight =
+        (accel_sample_valid != 0U) ? accel_confidence : 0.0f;
     float attitude_beta = madgwick_beta;
     madgwick_update_imu(gx_rads,
                         gy_rads,
@@ -1549,7 +1480,7 @@ int main(void)
                         -accel_lpf_y_g,
                         accel_lpf_z_g,
                         dt,
-                        accel_angles_valid,
+                        accel_correction_weight,
                         attitude_beta);
     madgwick_get_attitude(&theta_x, &theta_y, &theta_z);
 
@@ -1590,6 +1521,7 @@ int main(void)
     if (torque_cmd_y > LQR_TORQUE_LIMIT) torque_cmd_y = LQR_TORQUE_LIMIT;
     if (torque_cmd_y < -LQR_TORQUE_LIMIT) torque_cmd_y = -LQR_TORQUE_LIMIT;
 
+    if (TOF_ENABLE != 0U)
     {
       uint16_t distance_mm = 0U;
       HAL_StatusTypeDef tof_read_status = tof_try_read_distance(&distance_mm);
