@@ -18,3 +18,4 @@ __pycache__/
 *.su
 *.cyclo
 *.bak
+system_identification_results/
