@@ -123,9 +123,9 @@ ACTUATORS = {
         default_stiction_max_nm=0.12,
         default_stiction_ramp_nm_s=0.015,
         default_chirp_amplitude_nm=0.04,
-        default_max_velocity_rad_s=150.0,
+        default_max_velocity_rad_s=600.0,
         default_velocity_kd_nm_s_rad=0.02,
-        default_friction_speeds_rad_s=(2.0, 5.0, 10.0, 20.0),
+        default_friction_speeds_rad_s=(5.0, 15.0, 30.0, 40.0),
     ),
     "flywheel_y": ActuatorProfile(
         name="flywheel_y",
@@ -135,9 +135,9 @@ ACTUATORS = {
         default_stiction_max_nm=0.12,
         default_stiction_ramp_nm_s=0.015,
         default_chirp_amplitude_nm=0.04,
-        default_max_velocity_rad_s=150.0,
+        default_max_velocity_rad_s=600.0,
         default_velocity_kd_nm_s_rad=0.02,
-        default_friction_speeds_rad_s=(2.0, 5.0, 10.0, 20.0),
+        default_friction_speeds_rad_s=(5.0, 15.0, 30.0, 40.0),
     ),
     "spring_actuator": ActuatorProfile(
         name="spring_actuator",
@@ -147,9 +147,9 @@ ACTUATORS = {
         default_stiction_max_nm=0.30,
         default_stiction_ramp_nm_s=0.03,
         default_chirp_amplitude_nm=0.08,
-        default_max_velocity_rad_s=100.0,
+        default_max_velocity_rad_s=600.0,
         default_velocity_kd_nm_s_rad=0.06,
-        default_friction_speeds_rad_s=(2.0, 5.0, 10.0, 20.0),
+        default_friction_speeds_rad_s=(5.0, 20.0, 50.0, 100.0),
     ),
 }
 
@@ -391,6 +391,9 @@ class ExperimentRunner:
         sample_rate_hz: float,
         max_velocity_rad_s: float,
         movement_threshold_rad_s: float,
+        brake_timeout_s: float,
+        rest_confirm_s: float,
+        zero_torque_settle_s: float,
     ):
         self.transport = transport
         self.profile = profile
@@ -398,6 +401,9 @@ class ExperimentRunner:
         self.period_s = 1.0 / sample_rate_hz
         self.max_velocity_rad_s = max_velocity_rad_s
         self.movement_threshold_rad_s = movement_threshold_rad_s
+        self.brake_timeout_s = brake_timeout_s
+        self.rest_confirm_s = rest_confirm_s
+        self.zero_torque_settle_s = zero_torque_settle_s
         self._started_at = time.monotonic()
         self._unwrapper = PositionUnwrapper()
         self._csv_file = csv_path.open("w", newline="", encoding="utf-8")
@@ -574,22 +580,35 @@ class ExperimentRunner:
                 next_sample = time.monotonic()
         return feedback_samples
 
-    def brake_to_rest(
-        self, kd_nm_s_rad: float, timeout_s: float = 8.0
-    ) -> None:
+    def brake_to_rest(self, kd_nm_s_rad: float) -> None:
         stable_since: float | None = None
         started = time.monotonic()
         next_sample = started
         command = MotorCommand(velocity_rad_s=0.0, kd_nm_s_rad=kd_nm_s_rad)
 
-        while time.monotonic() - started < timeout_s:
+        while time.monotonic() - started < self.brake_timeout_s:
             self._wait_for_slot(next_sample)
             feedback = self.sample(command, "rest", 0)
             now = time.monotonic()
+            minimum_braking_torque = max(0.002, self.profile.torque_max_nm * 0.02)
+            if (
+                abs(feedback.velocity_rad_s) > self.movement_threshold_rad_s
+                and abs(feedback.torque_nm) > minimum_braking_torque
+                and feedback.velocity_rad_s * feedback.torque_nm > 0.0
+            ):
+                raise IdentificationError(
+                    "Controlled stop is adding energy instead of braking. "
+                    "Check the firmware velocity sign before continuing."
+                )
             if abs(feedback.velocity_rad_s) <= self.movement_threshold_rad_s:
                 stable_since = now if stable_since is None else stable_since
-                if now - stable_since >= 0.3:
-                    self.run_timed(0.2, "rest", 0, lambda _: MotorCommand())
+                if now - stable_since >= self.rest_confirm_s:
+                    self.run_timed(
+                        self.zero_torque_settle_s,
+                        "rest",
+                        0,
+                        lambda _: MotorCommand(),
+                    )
                     return
             else:
                 stable_since = None
@@ -670,6 +689,7 @@ class ExperimentRunner:
         for speed_magnitude in speeds_rad_s:
             for direction in (1, -1):
                 trial += 1
+                self.brake_to_rest(kd_nm_s_rad)
                 target = direction * speed_magnitude
                 print(f"  plateau {trial}/{2 * len(speeds_rad_s)}: {target:+.2f} rad/s")
                 command = MotorCommand(
@@ -795,6 +815,9 @@ def validate_run_arguments(args: argparse.Namespace, profile: ActuatorProfile) -
         "max-velocity-rad-s": args.max_velocity_rad_s,
         "movement-threshold-rad-s": args.movement_threshold_rad_s,
         "movement-confirm-s": args.movement_confirm_s,
+        "brake-timeout-s": args.brake_timeout_s,
+        "rest-confirm-s": args.rest_confirm_s,
+        "zero-torque-settle-s": args.zero_torque_settle_s,
         "velocity-kd": args.velocity_kd,
         "stiction-max-nm": args.stiction_max_nm,
         "stiction-ramp-nm-s": args.stiction_ramp_nm_s,
@@ -827,6 +850,15 @@ def validate_run_arguments(args: argparse.Namespace, profile: ActuatorProfile) -
         raise IdentificationError("--movement-threshold-rad-s must be positive")
     if args.movement_confirm_s <= 0:
         raise IdentificationError("--movement-confirm-s must be positive")
+    if (
+        args.brake_timeout_s <= 0
+        or args.rest_confirm_s <= 0
+        or args.zero_torque_settle_s <= 0
+    ):
+        raise IdentificationError(
+            "--brake-timeout-s, --rest-confirm-s, and "
+            "--zero-torque-settle-s must be positive"
+        )
     if args.stiction_repeats < 1:
         raise IdentificationError("--stiction-repeats must be at least 1")
     if not 0 < args.stiction_max_nm <= profile.torque_max_nm:
@@ -980,6 +1012,9 @@ def run_acquisition(args: argparse.Namespace) -> Path:
             sample_rate_hz=args.rate_hz,
             max_velocity_rad_s=args.max_velocity_rad_s,
             movement_threshold_rad_s=args.movement_threshold_rad_s,
+            brake_timeout_s=args.brake_timeout_s,
+            rest_confirm_s=args.rest_confirm_s,
+            zero_torque_settle_s=args.zero_torque_settle_s,
         )
         runner.start_motor()
         if "stiction" in selected_tests:
@@ -1646,13 +1681,16 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-velocity-rad-s", type=float)
     parser.add_argument("--movement-threshold-rad-s", type=float, default=0.5)
     parser.add_argument("--movement-confirm-s", type=float, default=0.03)
+    parser.add_argument("--brake-timeout-s", type=float, default=20.0)
+    parser.add_argument("--rest-confirm-s", type=float, default=1.0)
+    parser.add_argument("--zero-torque-settle-s", type=float, default=1.0)
     parser.add_argument("--velocity-kd", type=float)
     parser.add_argument("--stiction-repeats", type=int, default=3)
     parser.add_argument("--stiction-max-nm", type=float)
     parser.add_argument("--stiction-ramp-nm-s", type=float)
     parser.add_argument("--friction-speeds", type=parse_positive_speeds)
-    parser.add_argument("--friction-settle-s", type=float, default=2.0)
-    parser.add_argument("--friction-sample-s", type=float, default=2.0)
+    parser.add_argument("--friction-settle-s", type=float, default=10.0)
+    parser.add_argument("--friction-sample-s", type=float, default=3.0)
     parser.add_argument("--chirp-repeats", type=int, default=2)
     parser.add_argument("--chirp-amplitude-nm", type=float)
     parser.add_argument("--chirp-start-hz", type=float, default=0.5)

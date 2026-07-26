@@ -87,7 +87,7 @@ typedef struct {
  *   - If positive  → keep  +1.0f
  *   - If negative  → change to -1.0f  (kd will runaway without this)
  * Tuning note: with pos_actual in radians (-π..+π), use kp in range 50–500 Nm/rad. */
-#define ENCODER_VEL_SIGN  1.0f
+#define ENCODER_VEL_SIGN -1.0f
 
 // Conversion constants
 #define DPP_TO_RADIANS (2.0f * 3.14159265f / 65536.0f)
@@ -1257,7 +1257,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
                 // 2. Fetch speed (Returns RPM, convert to Rad/s)
                 {
                     float speed_rpm = MC_GetAverageMecSpeedMotor1_F();
-                    CurrentState.velocity_actual = speed_rpm * RPM_TO_RADS;
+                    CurrentState.velocity_actual = ENCODER_VEL_SIGN * speed_rpm * RPM_TO_RADS;
                 }
 
                 // 3. Fetch Torque (Returns Iq in Amps, convert to Nm)
