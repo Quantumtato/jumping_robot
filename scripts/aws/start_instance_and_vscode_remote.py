@@ -91,7 +91,7 @@ def ensure_ssh_config(alias, host, user, key_file):
         rf"(?ms)^Host[ \t]+{re.escape(alias)}[ \t]*\r?\n.*?(?=^Host[ \t]+|\Z)"
     )
     if host_block.search(existing):
-        updated = host_block.sub(entry.rstrip() + "\n", existing)
+        updated = host_block.sub(lambda _: entry.rstrip() + "\n", existing)
     else:
         updated = existing.rstrip() + "\n\n" + entry
     config_path.write_text(updated.lstrip(), encoding="utf-8")
@@ -156,20 +156,17 @@ def refresh_ssh_ingress(ec2_client, security_group_id):
 def open_vscode_remote(alias, remote_path):
     candidates = ["code", "code.cmd"]
     for name in candidates:
-        if shutil_which(name):
-            subprocess.run(
-                [name, "--remote", f"ssh-remote+{alias}", remote_path],
-                check=False,
-            )
-            return True
+        code_path = shutil.which(name)
+        if not code_path:
+            continue
+        command = [code_path, "--remote", f"ssh-remote+{alias}", remote_path]
+        if os.name == "nt" and code_path.lower().endswith((".bat", ".cmd")):
+            command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", *command]
+        return subprocess.run(command, check=False).returncode == 0
 
     print("VS Code CLI was not found on PATH.")
     print(f"You can connect manually with: Remote-SSH: Connect to Host -> {alias}")
     return False
-
-
-def shutil_which(cmd):
-    return shutil.which(cmd) is not None
 
 
 def parse_args():
