@@ -20,6 +20,7 @@ DEFAULT_SSH_ALIAS = "jumping-robot-aws"
 DEFAULT_SSH_USER = "ubuntu"
 DEFAULT_KEY_FILE = os.path.expanduser("~/.ssh/jumping_robot_aws")
 DEFAULT_SECURITY_GROUP_ID = "sg-0b53a7e3dbd8387fe"
+DEFAULT_REMOTE_PATH = "/home/ubuntu/workspace/jumping_robot"
 
 
 def describe_instance(ec2_client, instance_id):
@@ -152,11 +153,14 @@ def refresh_ssh_ingress(ec2_client, security_group_id):
     print(f"SSH access updated to {current_cidr}.")
 
 
-def open_vscode_remote(alias):
+def open_vscode_remote(alias, remote_path):
     candidates = ["code", "code.cmd"]
     for name in candidates:
         if shutil_which(name):
-            subprocess.run([name, f"--remote", f"ssh-remote+{alias}"], check=False)
+            subprocess.run(
+                [name, "--remote", f"ssh-remote+{alias}", remote_path],
+                check=False,
+            )
             return True
 
     print("VS Code CLI was not found on PATH.")
@@ -176,6 +180,7 @@ def parse_args():
     parser.add_argument("--ssh-user", default=DEFAULT_SSH_USER)
     parser.add_argument("--key-file", default=DEFAULT_KEY_FILE)
     parser.add_argument("--security-group-id", default=DEFAULT_SECURITY_GROUP_ID)
+    parser.add_argument("--remote-path", default=DEFAULT_REMOTE_PATH)
     parser.add_argument("--skip-ssh-config", action="store_true")
     parser.add_argument("--skip-ingress-update", action="store_true")
     parser.add_argument("--skip-vscode", action="store_true")
@@ -200,7 +205,7 @@ def main():
     print(f"SSH command: ssh {args.ssh_alias}")
 
     if not args.skip_vscode:
-        open_vscode_remote(args.ssh_alias)
+        open_vscode_remote(args.ssh_alias, args.remote_path)
 
 
 if __name__ == "__main__":
