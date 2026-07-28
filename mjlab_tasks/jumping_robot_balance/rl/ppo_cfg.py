@@ -41,6 +41,8 @@ def jumping_robot_balance_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             max_grad_norm=1.0,
         ),
         experiment_name="jumping_robot_balance",
+        logger="tensorboard",
+        upload_model=False,
         save_interval=100,
         num_steps_per_env=32,
         max_iterations=5000,
