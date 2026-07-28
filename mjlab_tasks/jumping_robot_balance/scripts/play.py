@@ -22,19 +22,25 @@ def main() -> None:
     from mjlab_tasks.jumping_robot_balance.task_registry import TASK_ID, register_tasks
 
     parser = argparse.ArgumentParser()
+    parser.add_argument("--agent", choices=("zero", "random", "trained"), default="zero")
     parser.add_argument("--checkpoint-file", default=None)
     parser.add_argument("--wandb-run-path", default=None)
     parser.add_argument("--num-envs", type=int, default=1)
+    parser.add_argument("--device", default=None)
     parser.add_argument("--viewer", choices=("auto", "native", "viser"), default="auto")
+    parser.add_argument("--no-terminations", action="store_true")
     args = parser.parse_args()
 
     register_tasks()
 
     cfg = PlayConfig(
+        agent=args.agent,
         checkpoint_file=args.checkpoint_file,
         wandb_run_path=args.wandb_run_path,
         num_envs=args.num_envs,
+        device=args.device,
         viewer=args.viewer,
+        no_terminations=args.no_terminations,
     )
     run_play(TASK_ID, cfg)
 
