@@ -19,3 +19,4 @@ __pycache__/
 *.cyclo
 *.bak
 system_identification_results/
+logs/

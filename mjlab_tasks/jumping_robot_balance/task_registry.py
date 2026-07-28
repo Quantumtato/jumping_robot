@@ -1,0 +1,24 @@
+"""Task registration for the jumping robot balance task."""
+
+from __future__ import annotations
+
+from mjlab.tasks.registry import list_tasks, register_mjlab_task
+
+from mjlab_tasks.jumping_robot_balance.env_cfg import jumping_robot_balance_env_cfg
+from mjlab_tasks.jumping_robot_balance.rl.ppo_cfg import (
+    jumping_robot_balance_ppo_runner_cfg,
+)
+
+TASK_ID = "Mjlab-Balance-JumpingRobot-v0"
+
+
+def register_tasks() -> None:
+    if TASK_ID in list_tasks():
+        return
+
+    register_mjlab_task(
+        task_id=TASK_ID,
+        env_cfg=jumping_robot_balance_env_cfg(),
+        play_env_cfg=jumping_robot_balance_env_cfg(play=True),
+        rl_cfg=jumping_robot_balance_ppo_runner_cfg(),
+    )

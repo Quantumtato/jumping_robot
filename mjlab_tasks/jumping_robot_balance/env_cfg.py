@@ -1,0 +1,64 @@
+"""Environment configuration for jumping robot balance in mjlab."""
+
+from __future__ import annotations
+
+from mjlab.envs import ManagerBasedRlEnvCfg
+from mjlab.scene import SceneCfg
+from mjlab.sim import MujocoCfg, SimulationCfg
+from mjlab.terrains import TerrainEntityCfg
+from mjlab.viewer import ViewerConfig
+
+from mjlab_tasks.jumping_robot_balance.mdp import (
+    build_action_terms,
+    build_observation_groups,
+    build_randomization_events,
+    build_reward_terms,
+    build_termination_terms,
+)
+from mjlab_tasks.jumping_robot_balance.robot_cfg import (
+    BASE_BODY_NAME,
+    EPISODE_LENGTH_S,
+    ROBOT_ENTITY_NAME,
+    SIM_DECIMATION,
+    SIM_TIMESTEP_S,
+    make_robot_entity_cfg,
+)
+
+
+def jumping_robot_balance_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    cfg = ManagerBasedRlEnvCfg(
+        scene=SceneCfg(
+            terrain=TerrainEntityCfg(terrain_type="plane"),
+            entities={ROBOT_ENTITY_NAME: make_robot_entity_cfg()},
+            num_envs=1,
+            env_spacing=2.5,
+        ),
+        observations=build_observation_groups(),
+        actions=build_action_terms(),
+        events=build_randomization_events(),
+        rewards=build_reward_terms(),
+        terminations=build_termination_terms(),
+        viewer=ViewerConfig(
+            origin_type=ViewerConfig.OriginType.ASSET_BODY,
+            entity_name=ROBOT_ENTITY_NAME,
+            body_name=BASE_BODY_NAME,
+            distance=1.5,
+            elevation=-20.0,
+            azimuth=90.0,
+        ),
+        sim=SimulationCfg(
+            mujoco=MujocoCfg(
+                timestep=SIM_TIMESTEP_S,
+                iterations=10,
+                ls_iterations=20,
+            )
+        ),
+        decimation=SIM_DECIMATION,
+        episode_length_s=EPISODE_LENGTH_S,
+    )
+
+    if play:
+        cfg.episode_length_s = 1e10
+        cfg.observations["actor"].enable_corruption = False
+
+    return cfg
