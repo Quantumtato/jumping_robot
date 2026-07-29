@@ -29,6 +29,7 @@ _ROBOT_CFG = SceneEntityCfg(ROBOT_ENTITY_NAME)
 _FLYWHEEL_CFG = SceneEntityCfg(
     ROBOT_ENTITY_NAME,
     joint_names=(FLYWHEEL_X_JOINT, FLYWHEEL_Y_JOINT),
+    preserve_order=True,
 )
 _LINEAR_CFG = SceneEntityCfg(ROBOT_ENTITY_NAME, joint_names=(LINEAR_JOINT,))
 

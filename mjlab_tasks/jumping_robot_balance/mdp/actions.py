@@ -17,9 +17,14 @@ from mjlab_tasks.jumping_robot_balance.robot_cfg import (
 
 def build_action_terms() -> dict[str, ActionTermCfg]:
     return {
-        "flywheel_torque": JointEffortActionCfg(
+        "flywheel_x_torque": JointEffortActionCfg(
             entity_name=ROBOT_ENTITY_NAME,
-            actuator_names=(FLYWHEEL_X_JOINT, FLYWHEEL_Y_JOINT),
+            actuator_names=(FLYWHEEL_X_JOINT,),
+            scale=MAX_FLYWHEEL_TORQUE_NM,
+        ),
+        "flywheel_y_torque": JointEffortActionCfg(
+            entity_name=ROBOT_ENTITY_NAME,
+            actuator_names=(FLYWHEEL_Y_JOINT,),
             scale=MAX_FLYWHEEL_TORQUE_NM,
         ),
         "linear_position": JointPositionActionCfg(

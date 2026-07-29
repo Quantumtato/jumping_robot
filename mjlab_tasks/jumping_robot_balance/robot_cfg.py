@@ -44,9 +44,14 @@ def get_robot_spec() -> mujoco.MjSpec:
 
 ROBOT_ARTICULATION = EntityArticulationInfoCfg(
     actuators=(
-        XmlActuatorCfg(target_names_expr=(FLYWHEEL_X_JOINT,)),
-        XmlActuatorCfg(target_names_expr=(FLYWHEEL_Y_JOINT,)),
-        XmlActuatorCfg(target_names_expr=(LINEAR_JOINT,)),
+        XmlActuatorCfg(
+            target_names_expr=(FLYWHEEL_X_JOINT, FLYWHEEL_Y_JOINT),
+            command_field="effort",
+        ),
+        XmlActuatorCfg(
+            target_names_expr=(LINEAR_JOINT,),
+            command_field="position",
+        ),
     ),
 )
 
