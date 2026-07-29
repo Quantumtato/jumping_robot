@@ -27,7 +27,9 @@
       <!-- Link flywheel -->
       <body name="flywheel" pos="-0 0.0376 0.234258" quat="0.0747795 -0.0747795 0.703142 0.703142">
         <!-- Joint from baserotor to flywheel -->
-        <joint axis="0 0 1" name="flywheelY" type="hinge"/>
+        <joint axis="0 0 1" name="flywheelY" type="hinge"
+               armature="0" frictionloss="0.001301448683080238"
+               damping="1.8675233508378078e-06"/>
         <inertial pos="-1e-12 0 0.0171871" mass="0.0948878" fullinertia="4.14884e-05 4.14884e-05 7.76954e-05 -0 -0 0"/>
         <!-- Part flywheel_parts -->
         <geom type="mesh" class="visual" pos="-1e-12 0 0.0171871" quat="0.0747795 0.0747795 -0.703142 -0.703142" mesh="flywheel_collision" material="flywheel_visual_material"/>
@@ -36,7 +38,9 @@
       <!-- Link flywheel_2 -->
       <body name="flywheel_2" pos="0.0376 0 0.234258" quat="0.67797 0.200888 0.67797 0.200888">
         <!-- Joint from baserotor to flywheel_2 -->
-        <joint axis="0 0 1" name="flywheelX" type="hinge"/>
+        <joint axis="0 0 1" name="flywheelX" type="hinge"
+               armature="0" frictionloss="0.001301448683080238"
+               damping="1.8675233508378078e-06"/>
         <inertial pos="-1e-12 0 0.0171871" mass="0.0948878" fullinertia="4.14884e-05 4.14884e-05 7.76954e-05 0 -0 0"/>
         <!-- Part flywheel_2_parts -->
         <geom type="mesh" class="visual" pos="-1e-12 0 0.0171871" quat="0.67797 -0.200888 -0.67797 -0.200888" mesh="flywheel_2_collision" material="flywheel_2_visual_material"/>

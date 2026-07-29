@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import mujoco
+
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
@@ -25,6 +27,10 @@ from mjlab_tasks.jumping_robot_balance.robot_cfg import (
 )
 
 
+def _configure_scene_spec(spec: mujoco.MjSpec) -> None:
+    spec.njmax = 128
+
+
 def jumping_robot_balance_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
         scene=SceneCfg(
@@ -32,6 +38,7 @@ def jumping_robot_balance_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             entities={ROBOT_ENTITY_NAME: make_robot_entity_cfg()},
             num_envs=1,
             env_spacing=2.5,
+            spec_fn=_configure_scene_spec,
         ),
         observations=build_observation_groups(),
         actions=build_action_terms(),
