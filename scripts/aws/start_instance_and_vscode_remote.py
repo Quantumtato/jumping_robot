@@ -21,6 +21,8 @@ DEFAULT_SSH_USER = "ubuntu"
 DEFAULT_KEY_FILE = os.path.expanduser("~/.ssh/jumping_robot_aws")
 DEFAULT_SECURITY_GROUP_ID = "sg-0b53a7e3dbd8387fe"
 DEFAULT_REMOTE_PATH = "/home/ubuntu/workspace/jumping_robot"
+LOCAL_VISER_PORT = 18081
+REMOTE_VISER_PORT = 8080
 
 
 def describe_instance(ec2_client, instance_id):
@@ -103,6 +105,7 @@ def ensure_ssh_config(alias, host, user, key_file):
         f"    IdentityFile {key_file}\n"
         "    StrictHostKeyChecking no\n"
         "    UserKnownHostsFile ~/.ssh/known_hosts\n"
+        f"    LocalForward {LOCAL_VISER_PORT} 127.0.0.1:{REMOTE_VISER_PORT}\n"
     )
 
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
@@ -229,6 +232,7 @@ def main():
         print(f"SSH alias '{args.ssh_alias}' configured.")
 
     print(f"SSH command: ssh {args.ssh_alias}")
+    print(f"Viser URL: http://localhost:{LOCAL_VISER_PORT}")
 
     if args.skip_vscode:
         return
