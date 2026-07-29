@@ -73,6 +73,25 @@ def start_instance(instance_id, region):
     return public_ip
 
 
+def stop_instance(instance_id, region):
+    ec2 = boto3.client("ec2", region_name=region)
+    instance = describe_instance(ec2, instance_id)
+    state = instance["State"]["Name"]
+    if state == "stopped":
+        print(f"Instance {instance_id} is already stopped.")
+        return
+    if state == "stopping":
+        print(f"Instance {instance_id} is already stopping.")
+    elif state in {"running", "pending"}:
+        print(f"Stopping instance {instance_id}...")
+        ec2.stop_instances(InstanceIds=[instance_id])
+    else:
+        raise RuntimeError(f"Cannot stop instance {instance_id} while it is {state}.")
+
+    ec2.get_waiter("instance_stopped").wait(InstanceIds=[instance_id])
+    print(f"Instance {instance_id} is stopped.")
+
+
 def ensure_ssh_config(alias, host, user, key_file):
     ssh_dir = Path.home() / ".ssh"
     ssh_dir.mkdir(exist_ok=True)
@@ -153,13 +172,16 @@ def refresh_ssh_ingress(ec2_client, security_group_id):
     print(f"SSH access updated to {current_cidr}.")
 
 
-def open_vscode_remote(alias, remote_path):
+def open_vscode_remote(alias, remote_path, wait_for_exit=False):
     candidates = ["code", "code.cmd"]
     for name in candidates:
         code_path = shutil.which(name)
         if not code_path:
             continue
-        command = [code_path, "--remote", f"ssh-remote+{alias}", remote_path]
+        command = [code_path, "--new-window"]
+        if wait_for_exit:
+            command.append("--wait")
+        command.extend(["--remote", f"ssh-remote+{alias}", remote_path])
         if os.name == "nt" and code_path.lower().endswith((".bat", ".cmd")):
             command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", *command]
         return subprocess.run(command, check=False).returncode == 0
@@ -181,11 +203,18 @@ def parse_args():
     parser.add_argument("--skip-ssh-config", action="store_true")
     parser.add_argument("--skip-ingress-update", action="store_true")
     parser.add_argument("--skip-vscode", action="store_true")
+    parser.add_argument(
+        "--stop-on-exit",
+        action="store_true",
+        help="Wait for the dedicated VS Code window to close, then stop the instance.",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.skip_vscode and args.stop_on_exit:
+        raise ValueError("--stop-on-exit cannot be combined with --skip-vscode.")
     if not Path(args.key_file).is_file():
         raise FileNotFoundError(f"SSH private key not found: {args.key_file}")
 
@@ -201,7 +230,22 @@ def main():
 
     print(f"SSH command: ssh {args.ssh_alias}")
 
-    if not args.skip_vscode:
+    if args.skip_vscode:
+        return
+
+    if args.stop_on_exit:
+        print(
+            "The instance will stop when this VS Code window closes. "
+            "Keep this launcher window open."
+        )
+        try:
+            if not open_vscode_remote(
+                args.ssh_alias, args.remote_path, wait_for_exit=True
+            ):
+                raise RuntimeError("VS Code exited with an error.")
+        finally:
+            stop_instance(args.instance_id, args.region)
+    else:
         open_vscode_remote(args.ssh_alias, args.remote_path)
 
 
