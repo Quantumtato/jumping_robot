@@ -35,7 +35,8 @@ SIM_TIMESTEP_S = 0.0005
 SIM_DECIMATION = 2
 
 EPISODE_LENGTH_S = 20.0
-DEFAULT_BASE_HEIGHT_M = 0.45
+# At the nominal linear position, this leaves the foot about 7 mm above the floor.
+DEFAULT_BASE_HEIGHT_M = -0.05
 
 
 def get_robot_spec() -> mujoco.MjSpec:

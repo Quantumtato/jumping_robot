@@ -33,13 +33,33 @@ _LINEAR_CFG = SceneEntityCfg(ROBOT_ENTITY_NAME, joint_names=(LINEAR_JOINT,))
 _FALL_LIMIT_RAD = math.radians(FALL_ANGLE_DEG)
 
 
-def upright_alignment(
+def upright_stability(
     env: "ManagerBasedRlEnv",
     asset_cfg: SceneEntityCfg = _ROBOT_CFG,
 ) -> torch.Tensor:
     asset: Entity = env.scene[asset_cfg.name]
-    z_up_component = -asset.data.projected_gravity_b[:, 2]
-    return torch.clamp(z_up_component, min=0.0)
+    horizontal_gravity_l2 = torch.sum(
+        torch.square(asset.data.projected_gravity_b[:, :2]),
+        dim=1,
+    )
+    width = math.sin(math.radians(10.0)) ** 2
+    return torch.exp(-horizontal_gravity_l2 / width)
+
+
+def tilt_error_l2(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _ROBOT_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    return torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+
+
+def base_angular_velocity_l2(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _ROBOT_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    return torch.sum(torch.square(asset.data.root_link_ang_vel_b), dim=1)
 
 
 def flywheel_speed_l2(
@@ -71,13 +91,23 @@ def build_reward_terms() -> dict[str, RewardTermCfg]:
     return {
         "alive": RewardTermCfg(func=envs_mdp.is_alive, weight=1.0),
         "upright": RewardTermCfg(
-            func=upright_alignment,
-            weight=1.0,
+            func=upright_stability,
+            weight=3.0,
+            params={"asset_cfg": _ROBOT_CFG},
+        ),
+        "tilt_error": RewardTermCfg(
+            func=tilt_error_l2,
+            weight=-2.0,
+            params={"asset_cfg": _ROBOT_CFG},
+        ),
+        "base_angular_velocity": RewardTermCfg(
+            func=base_angular_velocity_l2,
+            weight=-0.05,
             params={"asset_cfg": _ROBOT_CFG},
         ),
         "flywheel_speed": RewardTermCfg(
             func=flywheel_speed_l2,
-            weight=-0.1,
+            weight=-0.2,
             params={"asset_cfg": _FLYWHEEL_CFG},
         ),
         "linear_velocity": RewardTermCfg(
@@ -85,6 +115,6 @@ def build_reward_terms() -> dict[str, RewardTermCfg]:
             weight=-0.002,
             params={"asset_cfg": _LINEAR_CFG},
         ),
-        "action_rate": RewardTermCfg(func=envs_mdp.action_rate_l2, weight=-0.01),
-        "fall_event": RewardTermCfg(func=fell_over, weight=-100.0),
+        "action_rate": RewardTermCfg(func=envs_mdp.action_rate_l2, weight=-0.001),
+        "fall_event": RewardTermCfg(func=fell_over, weight=-10_000.0),
     }

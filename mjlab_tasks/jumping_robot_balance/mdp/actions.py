@@ -9,10 +9,11 @@ from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FLYWHEEL_X_JOINT,
     FLYWHEEL_Y_JOINT,
     LINEAR_JOINT,
-    LINEAR_RANGE_HALF_WIDTH_M,
     MAX_FLYWHEEL_TORQUE_NM,
     ROBOT_ENTITY_NAME,
 )
+
+_NOMINAL_BALANCE_LINEAR_SCALE_M = 0.0
 
 
 def build_action_terms() -> dict[str, ActionTermCfg]:
@@ -30,7 +31,9 @@ def build_action_terms() -> dict[str, ActionTermCfg]:
         "linear_position": JointPositionActionCfg(
             entity_name=ROBOT_ENTITY_NAME,
             actuator_names=(LINEAR_JOINT,),
-            scale=LINEAR_RANGE_HALF_WIDTH_M,
+            # Preserve the third policy output while holding the leg fixed during
+            # the nominal balance curriculum stage.
+            scale=_NOMINAL_BALANCE_LINEAR_SCALE_M,
             use_default_offset=True,
         ),
     }
