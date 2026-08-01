@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import re
+import sys
 from dataclasses import replace
 from pathlib import Path
-import sys
 
 import torch
 
@@ -29,6 +30,17 @@ def main() -> None:
     parser.add_argument("--max-iterations", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-root", default="logs/rsl_rl")
+    parser.add_argument(
+        "--stage",
+        choices=("nominal", "robust"),
+        default="nominal",
+        help="Training curriculum stage.",
+    )
+    parser.add_argument(
+        "--resume-from",
+        default=None,
+        help="Local checkpoint path under the experiment log directory.",
+    )
     args = parser.parse_args()
 
     register_tasks()
@@ -39,6 +51,35 @@ def main() -> None:
     cfg.agent.seed = args.seed
     cfg.env.seed = args.seed
     cfg = replace(cfg, log_root=args.log_root)
+
+    if args.stage == "robust":
+        from mjlab_tasks.jumping_robot_balance.mdp import build_robustness_events
+
+        cfg.env.events = build_robustness_events()
+        cfg.agent.algorithm.learning_rate = 1.0e-4
+        cfg.agent.algorithm.entropy_coef = 5.0e-4
+        cfg.agent.run_name = "robust"
+
+    if args.resume_from is not None:
+        resume_path = Path(args.resume_from).resolve()
+        if not resume_path.is_file():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        experiment_root = (
+            Path(args.log_root) / cfg.agent.experiment_name
+        ).resolve()
+        try:
+            relative_path = resume_path.relative_to(experiment_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"Resume checkpoint must be under {experiment_root}: {resume_path}"
+            ) from exc
+        if len(relative_path.parts) != 2:
+            raise ValueError(
+                "Resume checkpoint must be directly inside a training run directory."
+            )
+        cfg.agent.resume = True
+        cfg.agent.load_run = f"^{re.escape(relative_path.parent.name)}$"
+        cfg.agent.load_checkpoint = f"^{re.escape(relative_path.name)}$"
 
     if not torch.cuda.is_available():
         print("[WARN] No CUDA GPU detected; forcing CPU mode for mjlab training launch.")
