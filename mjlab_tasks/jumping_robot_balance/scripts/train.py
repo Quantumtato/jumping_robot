@@ -23,7 +23,11 @@ def main() -> None:
 
     from mjlab.scripts.train import TrainConfig, launch_training
 
-    from mjlab_tasks.jumping_robot_balance.task_registry import TASK_ID, register_tasks
+    from mjlab_tasks.jumping_robot_balance.task_registry import (
+        HEIGHT_TASK_ID,
+        TASK_ID,
+        register_tasks,
+    )
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-envs", type=int, default=2048)
@@ -32,7 +36,7 @@ def main() -> None:
     parser.add_argument("--log-root", default="logs/rsl_rl")
     parser.add_argument(
         "--stage",
-        choices=("nominal", "robust"),
+        choices=("nominal", "robust", "height"),
         default="nominal",
         help="Training curriculum stage.",
     )
@@ -45,7 +49,8 @@ def main() -> None:
 
     register_tasks()
 
-    cfg = TrainConfig.from_task(TASK_ID)
+    task_id = HEIGHT_TASK_ID if args.stage == "height" else TASK_ID
+    cfg = TrainConfig.from_task(task_id)
     cfg.env.scene.num_envs = args.num_envs
     cfg.agent.max_iterations = args.max_iterations
     cfg.agent.seed = args.seed
@@ -59,6 +64,15 @@ def main() -> None:
         cfg.agent.algorithm.learning_rate = 1.0e-4
         cfg.agent.algorithm.entropy_coef = 5.0e-4
         cfg.agent.run_name = "robust"
+    elif args.stage == "height":
+        from mjlab_tasks.jumping_robot_balance.mdp import (
+            build_height_robustness_events,
+        )
+
+        cfg.env.events = build_height_robustness_events()
+        cfg.agent.algorithm.learning_rate = 5.0e-5
+        cfg.agent.algorithm.entropy_coef = 2.5e-4
+        cfg.agent.run_name = "height"
 
     if args.resume_from is not None:
         resume_path = Path(args.resume_from).resolve()
@@ -85,7 +99,7 @@ def main() -> None:
         print("[WARN] No CUDA GPU detected; forcing CPU mode for mjlab training launch.")
         cfg = replace(cfg, gpu_ids=None)
 
-    launch_training(TASK_ID, cfg)
+    launch_training(task_id, cfg)
 
 
 if __name__ == "__main__":

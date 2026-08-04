@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import torch
+
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp import dr
 from mjlab.managers.event_manager import EventTermCfg
@@ -12,10 +14,12 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     BASE_BODY_NAME,
     DEFAULT_BASE_HEIGHT_M,
+    LINEAR_JOINT,
     ROBOT_ENTITY_NAME,
 )
 
 _BASE_BODY_CFG = SceneEntityCfg(ROBOT_ENTITY_NAME, body_names=(BASE_BODY_NAME,))
+_LINEAR_CFG = SceneEntityCfg(ROBOT_ENTITY_NAME, joint_names=(LINEAR_JOINT,))
 
 
 def build_randomization_events() -> dict[str, EventTermCfg]:
@@ -91,3 +95,30 @@ def build_robustness_events() -> dict[str, EventTermCfg]:
             },
         ),
     }
+
+
+def reset_linear_position_curriculum(
+    env,
+    env_ids: torch.Tensor | None,
+) -> None:
+    from mjlab_tasks.jumping_robot_balance.mdp.height_curriculum import (
+        scheduled_height_half_width,
+    )
+
+    half_width = scheduled_height_half_width(env.common_step_counter)
+    envs_mdp.reset_joints_by_offset(
+        env,
+        env_ids,
+        position_range=(-half_width, half_width),
+        velocity_range=(0.0, 0.0),
+        asset_cfg=_LINEAR_CFG,
+    )
+
+
+def build_height_robustness_events() -> dict[str, EventTermCfg]:
+    events = build_robustness_events()
+    events["reset_linear_position"] = EventTermCfg(
+        func=reset_linear_position_curriculum,
+        mode="reset",
+    )
+    return events

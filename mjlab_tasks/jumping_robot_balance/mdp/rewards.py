@@ -79,6 +79,11 @@ def linear_velocity_l2(
     return torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
 
 
+def linear_action_rate_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    delta = env.action_manager.action[:, 2] - env.action_manager.prev_action[:, 2]
+    return torch.square(delta)
+
+
 def fell_over(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return envs_mdp.bad_orientation(
         env,
@@ -87,8 +92,10 @@ def fell_over(env: "ManagerBasedRlEnv") -> torch.Tensor:
     ).float()
 
 
-def build_reward_terms() -> dict[str, RewardTermCfg]:
-    return {
+def build_reward_terms(
+    height_control: bool = False,
+) -> dict[str, RewardTermCfg]:
+    terms = {
         "alive": RewardTermCfg(func=envs_mdp.is_alive, weight=1.0),
         "upright": RewardTermCfg(
             func=upright_stability,
@@ -118,3 +125,10 @@ def build_reward_terms() -> dict[str, RewardTermCfg]:
         "action_rate": RewardTermCfg(func=envs_mdp.action_rate_l2, weight=-0.001),
         "fall_event": RewardTermCfg(func=fell_over, weight=-10_000.0),
     }
+    if height_control:
+        terms["linear_velocity"].weight = -0.01
+        terms["linear_action_rate"] = RewardTermCfg(
+            func=linear_action_rate_l2,
+            weight=-0.005,
+        )
+    return terms

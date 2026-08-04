@@ -13,6 +13,7 @@ from mjlab.viewer import ViewerConfig
 from mjlab_tasks.jumping_robot_balance.mdp import (
     build_action_terms,
     build_disturbance_commands,
+    build_height_action_terms,
     build_observation_groups,
     build_randomization_events,
     build_reward_terms,
@@ -32,7 +33,10 @@ def _configure_scene_spec(spec: mujoco.MjSpec) -> None:
     spec.njmax = 128
 
 
-def jumping_robot_balance_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def jumping_robot_balance_env_cfg(
+    play: bool = False,
+    height_control: bool = False,
+) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
         scene=SceneCfg(
             terrain=TerrainEntityCfg(terrain_type="plane"),
@@ -42,9 +46,13 @@ def jumping_robot_balance_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             spec_fn=_configure_scene_spec,
         ),
         observations=build_observation_groups(),
-        actions=build_action_terms(),
+        actions=(
+            build_height_action_terms(play=play)
+            if height_control
+            else build_action_terms()
+        ),
         events=build_randomization_events(),
-        rewards=build_reward_terms(),
+        rewards=build_reward_terms(height_control=height_control),
         terminations=build_termination_terms(),
         viewer=ViewerConfig(
             origin_type=ViewerConfig.OriginType.ASSET_BODY,
