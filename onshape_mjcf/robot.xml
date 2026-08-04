@@ -6,7 +6,6 @@
   <default>
     <default class="jumping_robot">
       <joint frictionloss="0.1" armature="0.005"/>
-      <position kp="50" dampratio="1"/>
       <default class="visual">
         <geom type="mesh" contype="0" conaffinity="0" group="2"/>
       </default>
@@ -75,8 +74,8 @@
   <actuator>
     <motor name="flywheelX" joint="flywheelX" ctrllimited="true" ctrlrange="-0.33 0.33"/>
     <motor name="flywheelY" joint="flywheelY" ctrllimited="true" ctrlrange="-0.33 0.33"/>
-    <position class="jumping_robot" name="linear" joint="linear" inheritrange="1"
-              forcelimited="true" forcerange="-120 120"/>
+    <motor name="linear" joint="linear" ctrllimited="true" ctrlrange="-120 120"
+           forcelimited="true" forcerange="-120 120"/>
   </actuator>
   <equality/>
 </mujoco>

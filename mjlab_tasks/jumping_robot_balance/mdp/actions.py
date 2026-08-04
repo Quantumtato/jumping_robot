@@ -7,12 +7,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from mjlab.envs.mdp.actions import (
-    JointEffortActionCfg,
-    JointPositionAction,
-    JointPositionActionCfg,
-)
-from mjlab.managers.action_manager import ActionTermCfg
+from mjlab.envs.mdp.actions import JointEffortActionCfg
+from mjlab.managers.action_manager import ActionTerm, ActionTermCfg
 
 from mjlab_tasks.jumping_robot_balance.mdp.height_curriculum import (
     HEIGHT_RANGE_SCHEDULE,
@@ -21,7 +17,11 @@ from mjlab_tasks.jumping_robot_balance.mdp.height_curriculum import (
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FLYWHEEL_X_JOINT,
     FLYWHEEL_Y_JOINT,
+    LINEAR_BALANCE_FEEDFORWARD_LIMIT_N,
     LINEAR_JOINT,
+    LINEAR_MAX_FORCE_N,
+    LINEAR_POSITION_KD_N_S_M,
+    LINEAR_POSITION_KP_N_M,
     LINEAR_RANGE_HALF_WIDTH_M,
     LINEAR_RANGE_MAX_M,
     LINEAR_RANGE_MIN_M,
@@ -36,44 +36,120 @@ _NOMINAL_BALANCE_LINEAR_SCALE_M = 0.0
 _HEIGHT_TARGET_MAX_SPEED_M_S = 0.25
 
 
-class CurriculumJointPositionAction(JointPositionAction):
-    cfg: CurriculumJointPositionActionCfg
+class LinearMitAction(ActionTerm):
+    cfg: LinearMitActionCfg
+
+    def __init__(self, cfg: LinearMitActionCfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        target_ids, target_names = self._entity.find_joints_by_actuator_names(
+            (LINEAR_JOINT,)
+        )
+        if len(target_ids) != 1:
+            raise ValueError(
+                f"Expected one linear actuator, found {target_names}."
+            )
+        self._target_ids = torch.tensor(
+            target_ids,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._action_dim = 2 if cfg.expose_feedforward else 1
+        self._raw_actions = torch.zeros(
+            self.num_envs,
+            self._action_dim,
+            device=self.device,
+        )
+        self._position_target = self._entity.data.default_joint_pos[
+            :, self._target_ids
+        ].clone()
+        self._feedforward_force = torch.zeros_like(self._position_target)
+
+    @property
+    def action_dim(self) -> int:
+        return self._action_dim
+
+    @property
+    def raw_action(self) -> torch.Tensor:
+        return self._raw_actions
+
+    @property
+    def position_target(self) -> torch.Tensor:
+        return self._position_target
+
+    @property
+    def feedforward_force(self) -> torch.Tensor:
+        return self._feedforward_force
 
     def process_actions(self, actions: torch.Tensor) -> None:
         self._raw_actions[:] = actions
         half_width = scheduled_height_half_width(
             self._env.common_step_counter,
-            self.cfg.scale_schedule,
+            self.cfg.position_scale_schedule,
         )
-        self._scale = half_width
-        desired = self._raw_actions * half_width + self._offset
-        if self.cfg.clip is not None:
-            desired = torch.clamp(
-                desired,
-                min=self._clip[:, :, 0],
-                max=self._clip[:, :, 1],
-            )
+        default_position = self._entity.data.default_joint_pos[
+            :, self._target_ids
+        ]
+        desired_position = torch.clamp(
+            default_position + actions[:, :1] * half_width,
+            min=LINEAR_RANGE_MIN_M,
+            max=LINEAR_RANGE_MAX_M,
+        )
         max_delta = self.cfg.max_target_speed_m_s * self._env.step_dt
-        self._processed_actions += torch.clamp(
-            desired - self._processed_actions,
+        self._position_target += torch.clamp(
+            desired_position - self._position_target,
             min=-max_delta,
             max=max_delta,
         )
+        if self.cfg.expose_feedforward:
+            self._feedforward_force[:] = (
+                torch.clamp(actions[:, 1:2], min=-1.0, max=1.0)
+                * self.cfg.feedforward_force_scale_n
+            )
+        else:
+            self._feedforward_force.zero_()
+
+    def apply_actions(self) -> None:
+        position = self._entity.data.joint_pos[:, self._target_ids]
+        velocity = self._entity.data.joint_vel[:, self._target_ids]
+        effort = (
+            self.cfg.kp_n_m * (self._position_target - position)
+            - self.cfg.kd_n_s_m * velocity
+            + self._feedforward_force
+        )
+        effort = torch.clamp(
+            effort,
+            min=-self.cfg.max_force_n,
+            max=self.cfg.max_force_n,
+        )
+        self._entity.set_joint_effort_target(
+            effort,
+            joint_ids=self._target_ids,
+        )
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
-        super().reset(env_ids)
-        self._processed_actions[env_ids] = self._entity.data.joint_pos[env_ids][
+        if env_ids is None:
+            env_ids = slice(None)
+        self._raw_actions[env_ids] = 0.0
+        self._feedforward_force[env_ids] = 0.0
+        self._position_target[env_ids] = self._entity.data.joint_pos[env_ids][
             :, self._target_ids
         ]
 
 
 @dataclass(kw_only=True)
-class CurriculumJointPositionActionCfg(JointPositionActionCfg):
-    scale_schedule: tuple[tuple[int, float], ...] = HEIGHT_RANGE_SCHEDULE
+class LinearMitActionCfg(ActionTermCfg):
+    position_scale_schedule: tuple[tuple[int, float], ...] = (
+        (0, _NOMINAL_BALANCE_LINEAR_SCALE_M),
+    )
     max_target_speed_m_s: float = _HEIGHT_TARGET_MAX_SPEED_M_S
+    kp_n_m: float = LINEAR_POSITION_KP_N_M
+    kd_n_s_m: float = LINEAR_POSITION_KD_N_S_M
+    max_force_n: float = LINEAR_MAX_FORCE_N
+    expose_feedforward: bool = False
+    feedforward_force_scale_n: float = LINEAR_BALANCE_FEEDFORWARD_LIMIT_N
 
-    def build(self, env: ManagerBasedRlEnv) -> CurriculumJointPositionAction:
-        return CurriculumJointPositionAction(self, env)
+    def build(self, env: ManagerBasedRlEnv) -> LinearMitAction:
+        return LinearMitAction(self, env)
 
 
 def build_action_terms() -> dict[str, ActionTermCfg]:
@@ -88,13 +164,10 @@ def build_action_terms() -> dict[str, ActionTermCfg]:
             actuator_names=(FLYWHEEL_Y_JOINT,),
             scale=MAX_FLYWHEEL_TORQUE_NM,
         ),
-        "linear_position": JointPositionActionCfg(
+        "linear_impedance": LinearMitActionCfg(
             entity_name=ROBOT_ENTITY_NAME,
-            actuator_names=(LINEAR_JOINT,),
             # Preserve the third policy output while holding the leg fixed during
             # the nominal balance curriculum stage.
-            scale=_NOMINAL_BALANCE_LINEAR_SCALE_M,
-            use_default_offset=True,
         ),
     }
 
@@ -106,13 +179,11 @@ def build_height_action_terms(play: bool = False) -> dict[str, ActionTermCfg]:
         if play
         else HEIGHT_RANGE_SCHEDULE
     )
-    terms["linear_position"] = CurriculumJointPositionActionCfg(
+    terms["linear_impedance"] = LinearMitActionCfg(
         entity_name=ROBOT_ENTITY_NAME,
-        actuator_names=(LINEAR_JOINT,),
-        scale=schedule[0][1],
-        scale_schedule=schedule,
+        position_scale_schedule=schedule,
         max_target_speed_m_s=_HEIGHT_TARGET_MAX_SPEED_M_S,
-        clip={LINEAR_JOINT: (LINEAR_RANGE_MIN_M, LINEAR_RANGE_MAX_M)},
-        use_default_offset=True,
+        expose_feedforward=True,
+        feedforward_force_scale_n=LINEAR_BALANCE_FEEDFORWARD_LIMIT_N,
     )
     return terms

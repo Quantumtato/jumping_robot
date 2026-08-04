@@ -43,7 +43,11 @@ def main() -> None:
     parser.add_argument(
         "--resume-from",
         default=None,
-        help="Local checkpoint path under the experiment log directory.",
+        help=(
+            "Local checkpoint path under the experiment log directory. "
+            "Height-stage checkpoints must use the four-action commanded-height "
+            "interface."
+        ),
     )
     args = parser.parse_args()
 

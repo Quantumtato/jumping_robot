@@ -11,6 +11,7 @@ from mjlab.envs import mdp as envs_mdp
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
+from mjlab_tasks.jumping_robot_balance.mdp.commands import HEIGHT_COMMAND_NAME
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FLYWHEEL_X_JOINT,
     FLYWHEEL_Y_JOINT,
@@ -52,7 +53,31 @@ def _normalized_linear_position(
     return 2.0 * (q - LINEAR_RANGE_MIN_M) / (LINEAR_RANGE_MAX_M - LINEAR_RANGE_MIN_M) - 1.0
 
 
-def build_observation_groups() -> dict[str, ObservationGroupCfg]:
+def _normalized_height_command(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    command = env.command_manager.get_command(HEIGHT_COMMAND_NAME)
+    return (
+        2.0
+        * (command - LINEAR_RANGE_MIN_M)
+        / (LINEAR_RANGE_MAX_M - LINEAR_RANGE_MIN_M)
+        - 1.0
+    )
+
+
+def _normalized_linear_position_target(
+    env: "ManagerBasedRlEnv",
+) -> torch.Tensor:
+    target = env.action_manager.get_term("linear_impedance").position_target
+    return (
+        2.0
+        * (target - LINEAR_RANGE_MIN_M)
+        / (LINEAR_RANGE_MAX_M - LINEAR_RANGE_MIN_M)
+        - 1.0
+    )
+
+
+def build_observation_groups(
+    height_control: bool = False,
+) -> dict[str, ObservationGroupCfg]:
     actor_terms = {
         "projected_gravity": ObservationTermCfg(
             func=envs_mdp.projected_gravity,
@@ -76,6 +101,13 @@ def build_observation_groups() -> dict[str, ObservationGroupCfg]:
         ),
         "last_action": ObservationTermCfg(func=envs_mdp.last_action),
     }
+    if height_control:
+        actor_terms["height_command"] = ObservationTermCfg(
+            func=_normalized_height_command,
+        )
+        actor_terms["linear_position_target"] = ObservationTermCfg(
+            func=_normalized_linear_position_target,
+        )
 
     return {
         "actor": ObservationGroupCfg(

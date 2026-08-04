@@ -14,6 +14,7 @@ from mjlab_tasks.jumping_robot_balance.mdp import (
     build_action_terms,
     build_disturbance_commands,
     build_height_action_terms,
+    build_height_commands,
     build_observation_groups,
     build_randomization_events,
     build_reward_terms,
@@ -45,7 +46,7 @@ def jumping_robot_balance_env_cfg(
             env_spacing=2.5,
             spec_fn=_configure_scene_spec,
         ),
-        observations=build_observation_groups(),
+        observations=build_observation_groups(height_control=height_control),
         actions=(
             build_height_action_terms(play=play)
             if height_control
@@ -73,9 +74,11 @@ def jumping_robot_balance_env_cfg(
         episode_length_s=EPISODE_LENGTH_S,
     )
 
+    commands = build_height_commands(play=play) if height_control else {}
     if play:
         cfg.episode_length_s = 1e10
         cfg.observations["actor"].enable_corruption = False
-        cfg.commands = build_disturbance_commands()
+        commands.update(build_disturbance_commands())
+    cfg.commands = commands
 
     return cfg

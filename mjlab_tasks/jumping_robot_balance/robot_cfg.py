@@ -23,6 +23,10 @@ MAX_FLYWHEEL_SPEED_RAD_S = 1500.0
 LINEAR_MAX_FORCE_N = 120.0
 LINEAR_MAX_SPEED_M_S = 60.0
 LINEAR_MAX_STROKE_M = 0.152
+# Approximately 5 Hz and critically damped for the 1.6 kg physical robot.
+LINEAR_POSITION_KP_N_M = 1600.0
+LINEAR_POSITION_KD_N_S_M = 100.0
+LINEAR_BALANCE_FEEDFORWARD_LIMIT_N = 30.0
 FALL_ANGLE_DEG = 30.0
 
 LINEAR_RANGE_MIN_M = -0.1458580691518949
@@ -51,7 +55,7 @@ ROBOT_ARTICULATION = EntityArticulationInfoCfg(
         ),
         XmlActuatorCfg(
             target_names_expr=(LINEAR_JOINT,),
-            command_field="position",
+            command_field="effort",
         ),
     ),
 )

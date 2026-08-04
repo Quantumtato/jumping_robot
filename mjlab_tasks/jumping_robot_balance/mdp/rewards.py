@@ -12,6 +12,7 @@ from mjlab.envs import mdp as envs_mdp
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
+from mjlab_tasks.jumping_robot_balance.mdp.commands import HEIGHT_COMMAND_NAME
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FALL_ANGLE_DEG,
     FLYWHEEL_X_JOINT,
@@ -84,6 +85,26 @@ def linear_action_rate_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return torch.square(delta)
 
 
+def linear_feedforward_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return torch.square(env.action_manager.action[:, 3])
+
+
+def linear_feedforward_rate_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    delta = env.action_manager.action[:, 3] - env.action_manager.prev_action[:, 3]
+    return torch.square(delta)
+
+
+def height_command_tracking(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _LINEAR_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    position = asset.data.joint_pos[:, asset_cfg.joint_ids]
+    command = env.command_manager.get_command(HEIGHT_COMMAND_NAME)
+    error = (position - command) / 0.01
+    return torch.exp(-torch.sum(torch.square(error), dim=1))
+
+
 def fell_over(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return envs_mdp.bad_orientation(
         env,
@@ -130,5 +151,18 @@ def build_reward_terms(
         terms["linear_action_rate"] = RewardTermCfg(
             func=linear_action_rate_l2,
             weight=-0.005,
+        )
+        terms["linear_feedforward"] = RewardTermCfg(
+            func=linear_feedforward_l2,
+            weight=-0.002,
+        )
+        terms["linear_feedforward_rate"] = RewardTermCfg(
+            func=linear_feedforward_rate_l2,
+            weight=-0.002,
+        )
+        terms["height_tracking"] = RewardTermCfg(
+            func=height_command_tracking,
+            weight=2.0,
+            params={"asset_cfg": _LINEAR_CFG},
         )
     return terms
