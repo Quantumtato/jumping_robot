@@ -75,7 +75,8 @@ def main() -> None:
 
         cfg.env.events = build_height_robustness_events()
         cfg.agent.algorithm.learning_rate = 5.0e-5
-        cfg.agent.algorithm.entropy_coef = 2.5e-4
+        cfg.agent.algorithm.schedule = "fixed"
+        cfg.agent.algorithm.entropy_coef = 5.0e-4
         cfg.agent.run_name = "height"
 
     if args.resume_from is not None:

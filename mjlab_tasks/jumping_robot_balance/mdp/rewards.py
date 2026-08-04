@@ -101,8 +101,8 @@ def height_command_tracking(
     asset: Entity = env.scene[asset_cfg.name]
     position = asset.data.joint_pos[:, asset_cfg.joint_ids]
     command = env.command_manager.get_command(HEIGHT_COMMAND_NAME)
-    error = (position - command) / 0.01
-    return torch.exp(-torch.sum(torch.square(error), dim=1))
+    error = torch.sum(torch.abs(position - command), dim=1)
+    return torch.exp(-error / 0.025)
 
 
 def fell_over(env: "ManagerBasedRlEnv") -> torch.Tensor:
@@ -147,6 +147,7 @@ def build_reward_terms(
         "fall_event": RewardTermCfg(func=fell_over, weight=-10_000.0),
     }
     if height_control:
+        terms["upright"].weight = 4.0
         terms["linear_velocity"].weight = -0.01
         terms["linear_action_rate"] = RewardTermCfg(
             func=linear_action_rate_l2,

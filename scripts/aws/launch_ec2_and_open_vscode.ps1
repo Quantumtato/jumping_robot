@@ -120,6 +120,8 @@ Host $sshHostAlias
     IdentityFile $KeyFilePath
     StrictHostKeyChecking no
     UserKnownHostsFile ~/.ssh/known_hosts
+    LocalForward 18081 127.0.0.1:8080
+    LocalForward 16006 127.0.0.1:6006
 "@
 
     $existingConfig = ""

@@ -10,8 +10,8 @@ import torch
 from mjlab.envs.mdp.actions import JointEffortActionCfg
 from mjlab.managers.action_manager import ActionTerm, ActionTermCfg
 
+from mjlab_tasks.jumping_robot_balance.mdp.commands import HEIGHT_COMMAND_NAME
 from mjlab_tasks.jumping_robot_balance.mdp.height_curriculum import (
-    HEIGHT_RANGE_SCHEDULE,
     scheduled_height_half_width,
 )
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
@@ -22,7 +22,6 @@ from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     LINEAR_MAX_FORCE_N,
     LINEAR_POSITION_KD_N_S_M,
     LINEAR_POSITION_KP_N_M,
-    LINEAR_RANGE_HALF_WIDTH_M,
     LINEAR_RANGE_MAX_M,
     LINEAR_RANGE_MIN_M,
     MAX_FLYWHEEL_TORQUE_NM,
@@ -33,7 +32,8 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 _NOMINAL_BALANCE_LINEAR_SCALE_M = 0.0
-_HEIGHT_TARGET_MAX_SPEED_M_S = 0.25
+_HEIGHT_POSITION_RESIDUAL_SCALE_M = 0.010
+_HEIGHT_TARGET_MAX_SPEED_M_S = 1.0
 
 
 class LinearMitAction(ActionTerm):
@@ -86,11 +86,16 @@ class LinearMitAction(ActionTerm):
             self._env.common_step_counter,
             self.cfg.position_scale_schedule,
         )
-        default_position = self._entity.data.default_joint_pos[
-            :, self._target_ids
-        ]
+        if self.cfg.position_command_name is None:
+            position_center = self._entity.data.default_joint_pos[
+                :, self._target_ids
+            ]
+        else:
+            position_center = self._env.command_manager.get_command(
+                self.cfg.position_command_name
+            )
         desired_position = torch.clamp(
-            default_position + actions[:, :1] * half_width,
+            position_center + actions[:, :1] * half_width,
             min=LINEAR_RANGE_MIN_M,
             max=LINEAR_RANGE_MAX_M,
         )
@@ -147,6 +152,7 @@ class LinearMitActionCfg(ActionTermCfg):
     max_force_n: float = LINEAR_MAX_FORCE_N
     expose_feedforward: bool = False
     feedforward_force_scale_n: float = LINEAR_BALANCE_FEEDFORWARD_LIMIT_N
+    position_command_name: str | None = None
 
     def build(self, env: ManagerBasedRlEnv) -> LinearMitAction:
         return LinearMitAction(self, env)
@@ -173,17 +179,14 @@ def build_action_terms() -> dict[str, ActionTermCfg]:
 
 
 def build_height_action_terms(play: bool = False) -> dict[str, ActionTermCfg]:
+    del play
     terms = build_action_terms()
-    schedule = (
-        ((0, LINEAR_RANGE_HALF_WIDTH_M),)
-        if play
-        else HEIGHT_RANGE_SCHEDULE
-    )
     terms["linear_impedance"] = LinearMitActionCfg(
         entity_name=ROBOT_ENTITY_NAME,
-        position_scale_schedule=schedule,
+        position_scale_schedule=((0, _HEIGHT_POSITION_RESIDUAL_SCALE_M),),
         max_target_speed_m_s=_HEIGHT_TARGET_MAX_SPEED_M_S,
         expose_feedforward=True,
         feedforward_force_scale_n=LINEAR_BALANCE_FEEDFORWARD_LIMIT_N,
+        position_command_name=HEIGHT_COMMAND_NAME,
     )
     return terms

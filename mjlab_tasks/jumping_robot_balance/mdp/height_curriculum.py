@@ -4,9 +4,9 @@ from __future__ import annotations
 
 HEIGHT_RANGE_SCHEDULE: tuple[tuple[int, float], ...] = (
     (0, 0.010),
-    (32_000, 0.025),
-    (64_000, 0.045),
-    (96_000, 0.078),
+    (64_000, 0.025),
+    (128_000, 0.045),
+    (192_000, 0.078),
 )
 
 
