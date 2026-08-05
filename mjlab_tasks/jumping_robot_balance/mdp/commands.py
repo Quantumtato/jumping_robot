@@ -17,7 +17,8 @@ from mjlab_tasks.jumping_robot_balance.mdp.height_curriculum import (
 )
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     LINEAR_RANGE_CENTER_M,
-    LINEAR_RANGE_HALF_WIDTH_M,
+    LINEAR_RANGE_MAX_M,
+    LINEAR_RANGE_MIN_M,
 )
 
 if TYPE_CHECKING:
@@ -59,6 +60,16 @@ class HeightCommand(CommandTerm):
             (len(env_ids), 1),
             device=self.device,
         ).uniform_(-half_width, half_width)
+        endpoint_mask = torch.rand(
+            (len(env_ids), 1),
+            device=self.device,
+        ) < self.cfg.endpoint_sample_probability
+        endpoint = torch.where(
+            torch.rand((len(env_ids), 1), device=self.device) < 0.5,
+            -half_width,
+            half_width,
+        )
+        sampled = torch.where(endpoint_mask, endpoint, sampled)
         self._command[env_ids] = sampled + LINEAR_RANGE_CENTER_M
 
     def _update_command(self) -> None:
@@ -67,7 +78,10 @@ class HeightCommand(CommandTerm):
                 env_idx, command = self._pending.get_nowait()
             except Empty:
                 break
-            self._command[env_idx, 0] = command
+            self._command[env_idx, 0] = min(
+                max(command, LINEAR_RANGE_MIN_M),
+                LINEAR_RANGE_MAX_M,
+            )
 
     def create_gui(
         self,
@@ -79,17 +93,23 @@ class HeightCommand(CommandTerm):
     ) -> None:
         del name
         with server.gui.add_folder("Height command"):
+            travel_mm = 1000.0 * (LINEAR_RANGE_MAX_M - LINEAR_RANGE_MIN_M)
+            server.gui.add_html(
+                "<small>Absolute actuator extension: 0 mm is minimum travel "
+                f"and {travel_mm:.0f} mm is maximum travel.</small>"
+            )
             slider = server.gui.add_slider(
-                "Height offset (mm)",
-                min=-1000.0 * LINEAR_RANGE_HALF_WIDTH_M,
-                max=1000.0 * LINEAR_RANGE_HALF_WIDTH_M,
+                "Linear extension (mm)",
+                min=0.0,
+                max=travel_mm,
                 step=1.0,
-                initial_value=0.0,
+                initial_value=1000.0
+                * (LINEAR_RANGE_CENTER_M - LINEAR_RANGE_MIN_M),
             )
 
             @slider.on_update
             def _(event) -> None:
-                command = LINEAR_RANGE_CENTER_M + float(event.target.value) / 1000.0
+                command = LINEAR_RANGE_MIN_M + float(event.target.value) / 1000.0
                 self._pending.put((get_env_idx(), command))
                 if on_change is not None:
                     on_change()
@@ -101,6 +121,7 @@ class HeightCommand(CommandTerm):
 class HeightCommandCfg(CommandTermCfg):
     play: bool = False
     range_schedule: tuple[tuple[int, float], ...] = HEIGHT_RANGE_SCHEDULE
+    endpoint_sample_probability: float = 0.2
     resampling_time_range: tuple[float, float] = (4.0, 8.0)
 
     def build(self, env: ManagerBasedRlEnv) -> HeightCommand:
