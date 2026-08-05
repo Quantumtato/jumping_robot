@@ -25,6 +25,7 @@ def main() -> None:
 
     from mjlab_tasks.jumping_robot_balance.task_registry import (
         HEIGHT_TASK_ID,
+        JUMP_STAGE_ONE_TASK_ID,
         TASK_ID,
         register_tasks,
     )
@@ -36,7 +37,7 @@ def main() -> None:
     parser.add_argument("--log-root", default="logs/rsl_rl")
     parser.add_argument(
         "--stage",
-        choices=("nominal", "robust", "height"),
+        choices=("nominal", "robust", "height", "jump-stage-1"),
         default="nominal",
         help="Training curriculum stage.",
     )
@@ -45,7 +46,7 @@ def main() -> None:
         default=None,
         help=(
             "Local checkpoint path under the experiment log directory. "
-            "Height-stage checkpoints must use the four-action commanded-height "
+            "Checkpoints must match the selected stage's action and observation "
             "interface."
         ),
     )
@@ -53,7 +54,10 @@ def main() -> None:
 
     register_tasks()
 
-    task_id = HEIGHT_TASK_ID if args.stage == "height" else TASK_ID
+    task_id = {
+        "height": HEIGHT_TASK_ID,
+        "jump-stage-1": JUMP_STAGE_ONE_TASK_ID,
+    }.get(args.stage, TASK_ID)
     cfg = TrainConfig.from_task(task_id)
     cfg.env.scene.num_envs = args.num_envs
     cfg.agent.max_iterations = args.max_iterations
@@ -78,6 +82,16 @@ def main() -> None:
         cfg.agent.algorithm.schedule = "fixed"
         cfg.agent.algorithm.entropy_coef = 5.0e-4
         cfg.agent.run_name = "height"
+    elif args.stage == "jump-stage-1":
+        from mjlab_tasks.jumping_robot_balance.mdp import (
+            build_height_robustness_events,
+        )
+
+        cfg.env.events = build_height_robustness_events()
+        cfg.agent.algorithm.learning_rate = 5.0e-5
+        cfg.agent.algorithm.schedule = "fixed"
+        cfg.agent.algorithm.entropy_coef = 5.0e-4
+        cfg.agent.run_name = "jump_stage_1"
 
     if args.resume_from is not None:
         resume_path = Path(args.resume_from).resolve()

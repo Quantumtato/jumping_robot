@@ -15,6 +15,7 @@ from mjlab_tasks.jumping_robot_balance.mdp import (
     build_disturbance_commands,
     build_height_action_terms,
     build_height_commands,
+    build_jump_stage_one_action_terms,
     build_observation_groups,
     build_randomization_events,
     build_reward_terms,
@@ -37,7 +38,9 @@ def _configure_scene_spec(spec: mujoco.MjSpec) -> None:
 def jumping_robot_balance_env_cfg(
     play: bool = False,
     height_control: bool = False,
+    jump_stage_one: bool = False,
 ) -> ManagerBasedRlEnvCfg:
+    height_control = height_control or jump_stage_one
     cfg = ManagerBasedRlEnvCfg(
         scene=SceneCfg(
             terrain=TerrainEntityCfg(terrain_type="plane"),
@@ -46,14 +49,24 @@ def jumping_robot_balance_env_cfg(
             env_spacing=2.5,
             spec_fn=_configure_scene_spec,
         ),
-        observations=build_observation_groups(height_control=height_control),
+        observations=build_observation_groups(
+            height_control=height_control,
+            jump_stage_one=jump_stage_one,
+        ),
         actions=(
-            build_height_action_terms(play=play)
-            if height_control
-            else build_action_terms()
+            build_jump_stage_one_action_terms()
+            if jump_stage_one
+            else (
+                build_height_action_terms(play=play)
+                if height_control
+                else build_action_terms()
+            )
         ),
         events=build_randomization_events(),
-        rewards=build_reward_terms(height_control=height_control),
+        rewards=build_reward_terms(
+            height_control=height_control,
+            jump_stage_one=jump_stage_one,
+        ),
         terminations=build_termination_terms(),
         viewer=ViewerConfig(
             origin_type=ViewerConfig.OriginType.ASSET_BODY,

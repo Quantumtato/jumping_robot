@@ -13,6 +13,7 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from mjlab_tasks.jumping_robot_balance.mdp.commands import HEIGHT_COMMAND_NAME
+from mjlab_tasks.jumping_robot_balance.mdp.contact import foot_ground_contact
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FALL_ANGLE_DEG,
     FLYWHEEL_X_JOINT,
@@ -80,18 +81,39 @@ def linear_velocity_l2(
     return torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
 
 
+def _linear_action_start(env: "ManagerBasedRlEnv") -> int:
+    term = env.action_manager.get_term("linear_impedance")
+    return env.action_manager.total_action_dim - term.action_dim
+
+
 def linear_action_rate_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
-    delta = env.action_manager.action[:, 2] - env.action_manager.prev_action[:, 2]
+    index = _linear_action_start(env)
+    delta = env.action_manager.action[:, index] - env.action_manager.prev_action[:, index]
     return torch.square(delta)
 
 
 def linear_feedforward_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
-    return torch.square(env.action_manager.action[:, 3])
+    return torch.square(env.action_manager.action[:, -1])
 
 
 def linear_feedforward_rate_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
-    delta = env.action_manager.action[:, 3] - env.action_manager.prev_action[:, 3]
+    delta = env.action_manager.action[:, -1] - env.action_manager.prev_action[:, -1]
     return torch.square(delta)
+
+
+def linear_velocity_action_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    index = _linear_action_start(env) + 1
+    return torch.square(env.action_manager.action[:, index])
+
+
+def linear_velocity_action_rate_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    index = _linear_action_start(env) + 1
+    delta = env.action_manager.action[:, index] - env.action_manager.prev_action[:, index]
+    return torch.square(delta)
+
+
+def off_ground(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return 1.0 - foot_ground_contact(env)[:, 0]
 
 
 def height_command_tracking(
@@ -115,6 +137,7 @@ def fell_over(env: "ManagerBasedRlEnv") -> torch.Tensor:
 
 def build_reward_terms(
     height_control: bool = False,
+    jump_stage_one: bool = False,
 ) -> dict[str, RewardTermCfg]:
     terms = {
         "alive": RewardTermCfg(func=envs_mdp.is_alive, weight=1.0),
@@ -165,5 +188,18 @@ def build_reward_terms(
             func=height_command_tracking,
             weight=2.0,
             params={"asset_cfg": _LINEAR_CFG},
+        )
+    if jump_stage_one:
+        terms["linear_velocity_action"] = RewardTermCfg(
+            func=linear_velocity_action_l2,
+            weight=-0.001,
+        )
+        terms["linear_velocity_action_rate"] = RewardTermCfg(
+            func=linear_velocity_action_rate_l2,
+            weight=-0.002,
+        )
+        terms["off_ground"] = RewardTermCfg(
+            func=off_ground,
+            weight=-2.0,
         )
     return terms

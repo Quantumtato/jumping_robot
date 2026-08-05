@@ -22,6 +22,7 @@ from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     LINEAR_MAX_FORCE_N,
     LINEAR_POSITION_KD_N_S_M,
     LINEAR_POSITION_KP_N_M,
+    LINEAR_RANGE_HALF_WIDTH_M,
     LINEAR_RANGE_MAX_M,
     LINEAR_RANGE_MIN_M,
     MAX_FLYWHEEL_TORQUE_NM,
@@ -34,6 +35,9 @@ if TYPE_CHECKING:
 _NOMINAL_BALANCE_LINEAR_SCALE_M = 0.0
 _HEIGHT_POSITION_RESIDUAL_SCALE_M = 0.010
 _HEIGHT_TARGET_MAX_SPEED_M_S = 1.0
+_JUMP_POSITION_RESIDUAL_SCALE_M = LINEAR_RANGE_HALF_WIDTH_M
+_JUMP_TARGET_MAX_SPEED_M_S = 3.0
+_JUMP_VELOCITY_TARGET_SCALE_M_S = 3.0
 
 
 class LinearMitAction(ActionTerm):
@@ -53,7 +57,9 @@ class LinearMitAction(ActionTerm):
             dtype=torch.long,
             device=self.device,
         )
-        self._action_dim = 2 if cfg.expose_feedforward else 1
+        self._action_dim = (
+            1 + int(cfg.expose_velocity_target) + int(cfg.expose_feedforward)
+        )
         self._raw_actions = torch.zeros(
             self.num_envs,
             self._action_dim,
@@ -62,6 +68,7 @@ class LinearMitAction(ActionTerm):
         self._position_target = self._entity.data.default_joint_pos[
             :, self._target_ids
         ].clone()
+        self._velocity_target = torch.zeros_like(self._position_target)
         self._feedforward_force = torch.zeros_like(self._position_target)
 
     @property
@@ -75,6 +82,10 @@ class LinearMitAction(ActionTerm):
     @property
     def position_target(self) -> torch.Tensor:
         return self._position_target
+
+    @property
+    def velocity_target(self) -> torch.Tensor:
+        return self._velocity_target
 
     @property
     def feedforward_force(self) -> torch.Tensor:
@@ -105,10 +116,35 @@ class LinearMitAction(ActionTerm):
             min=-max_delta,
             max=max_delta,
         )
+        action_index = 1
+        if self.cfg.expose_velocity_target:
+            normalized_velocity = torch.clamp(
+                actions[:, action_index : action_index + 1],
+                min=-1.0,
+                max=1.0,
+            )
+            normalized_velocity = (
+                torch.sign(normalized_velocity)
+                * torch.abs(normalized_velocity) ** self.cfg.velocity_target_exponent
+            )
+            self._velocity_target[:] = (
+                normalized_velocity * self.cfg.velocity_target_scale_m_s
+            )
+            action_index += 1
+        else:
+            self._velocity_target.zero_()
         if self.cfg.expose_feedforward:
+            normalized_force = torch.clamp(
+                actions[:, action_index : action_index + 1],
+                min=-1.0,
+                max=1.0,
+            )
+            normalized_force = (
+                torch.sign(normalized_force)
+                * torch.abs(normalized_force) ** self.cfg.feedforward_exponent
+            )
             self._feedforward_force[:] = (
-                torch.clamp(actions[:, 1:2], min=-1.0, max=1.0)
-                * self.cfg.feedforward_force_scale_n
+                normalized_force * self.cfg.feedforward_force_scale_n
             )
         else:
             self._feedforward_force.zero_()
@@ -118,7 +154,7 @@ class LinearMitAction(ActionTerm):
         velocity = self._entity.data.joint_vel[:, self._target_ids]
         effort = (
             self.cfg.kp_n_m * (self._position_target - position)
-            - self.cfg.kd_n_s_m * velocity
+            + self.cfg.kd_n_s_m * (self._velocity_target - velocity)
             + self._feedforward_force
         )
         effort = torch.clamp(
@@ -135,6 +171,7 @@ class LinearMitAction(ActionTerm):
         if env_ids is None:
             env_ids = slice(None)
         self._raw_actions[env_ids] = 0.0
+        self._velocity_target[env_ids] = 0.0
         self._feedforward_force[env_ids] = 0.0
         self._position_target[env_ids] = self._entity.data.joint_pos[env_ids][
             :, self._target_ids
@@ -150,8 +187,12 @@ class LinearMitActionCfg(ActionTermCfg):
     kp_n_m: float = LINEAR_POSITION_KP_N_M
     kd_n_s_m: float = LINEAR_POSITION_KD_N_S_M
     max_force_n: float = LINEAR_MAX_FORCE_N
+    expose_velocity_target: bool = False
+    velocity_target_scale_m_s: float = 0.0
+    velocity_target_exponent: float = 1.0
     expose_feedforward: bool = False
     feedforward_force_scale_n: float = LINEAR_BALANCE_FEEDFORWARD_LIMIT_N
+    feedforward_exponent: float = 1.0
     position_command_name: str | None = None
 
     def build(self, env: ManagerBasedRlEnv) -> LinearMitAction:
@@ -187,6 +228,23 @@ def build_height_action_terms(play: bool = False) -> dict[str, ActionTermCfg]:
         max_target_speed_m_s=_HEIGHT_TARGET_MAX_SPEED_M_S,
         expose_feedforward=True,
         feedforward_force_scale_n=LINEAR_BALANCE_FEEDFORWARD_LIMIT_N,
+        position_command_name=HEIGHT_COMMAND_NAME,
+    )
+    return terms
+
+
+def build_jump_stage_one_action_terms() -> dict[str, ActionTermCfg]:
+    terms = build_action_terms()
+    terms["linear_impedance"] = LinearMitActionCfg(
+        entity_name=ROBOT_ENTITY_NAME,
+        position_scale_schedule=((0, _JUMP_POSITION_RESIDUAL_SCALE_M),),
+        max_target_speed_m_s=_JUMP_TARGET_MAX_SPEED_M_S,
+        expose_velocity_target=True,
+        velocity_target_scale_m_s=_JUMP_VELOCITY_TARGET_SCALE_M_S,
+        velocity_target_exponent=3.0,
+        expose_feedforward=True,
+        feedforward_force_scale_n=LINEAR_MAX_FORCE_N,
+        feedforward_exponent=3.0,
         position_command_name=HEIGHT_COMMAND_NAME,
     )
     return terms

@@ -12,6 +12,7 @@ from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationT
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from mjlab_tasks.jumping_robot_balance.mdp.commands import HEIGHT_COMMAND_NAME
+from mjlab_tasks.jumping_robot_balance.mdp.contact import foot_ground_contact
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FLYWHEEL_X_JOINT,
     FLYWHEEL_Y_JOINT,
@@ -75,8 +76,16 @@ def _normalized_linear_position_target(
     )
 
 
+def _normalized_linear_velocity_target(
+    env: "ManagerBasedRlEnv",
+) -> torch.Tensor:
+    term = env.action_manager.get_term("linear_impedance")
+    return term.velocity_target / term.cfg.velocity_target_scale_m_s
+
+
 def build_observation_groups(
     height_control: bool = False,
+    jump_stage_one: bool = False,
 ) -> dict[str, ObservationGroupCfg]:
     actor_terms = {
         "projected_gravity": ObservationTermCfg(
@@ -107,6 +116,13 @@ def build_observation_groups(
         )
         actor_terms["linear_position_target"] = ObservationTermCfg(
             func=_normalized_linear_position_target,
+        )
+    if jump_stage_one:
+        actor_terms["linear_velocity_target"] = ObservationTermCfg(
+            func=_normalized_linear_velocity_target,
+        )
+        actor_terms["foot_contact"] = ObservationTermCfg(
+            func=foot_ground_contact,
         )
 
     return {
