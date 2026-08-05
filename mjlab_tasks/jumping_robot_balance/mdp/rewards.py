@@ -14,6 +14,13 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from mjlab_tasks.jumping_robot_balance.mdp.commands import HEIGHT_COMMAND_NAME
 from mjlab_tasks.jumping_robot_balance.mdp.contact import foot_ground_contact
+from mjlab_tasks.jumping_robot_balance.mdp.jump_commands import (
+    JUMP_COMMAND_NAME,
+    PHASE_FLIGHT,
+    PHASE_RECOVERY,
+    PHASE_TAKEOFF,
+    JumpCommand,
+)
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FALL_ANGLE_DEG,
     FLYWHEEL_X_JOINT,
@@ -116,6 +123,21 @@ def off_ground(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return 1.0 - foot_ground_contact(env)[:, 0]
 
 
+def _jump_term(env: "ManagerBasedRlEnv") -> JumpCommand:
+    term = env.command_manager.get_term(JUMP_COMMAND_NAME)
+    if not isinstance(term, JumpCommand):
+        raise TypeError(f"Expected JumpCommand, received {type(term).__name__}.")
+    return term
+
+
+def _jump_active(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return env.command_manager.get_command(JUMP_COMMAND_NAME)[:, 0]
+
+
+def balance_off_ground(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return off_ground(env) * (1.0 - _jump_active(env))
+
+
 def height_command_tracking(
     env: "ManagerBasedRlEnv",
     asset_cfg: SceneEntityCfg = _LINEAR_CFG,
@@ -125,6 +147,70 @@ def height_command_tracking(
     command = env.command_manager.get_command(HEIGHT_COMMAND_NAME)
     error = torch.sum(torch.abs(position - command), dim=1)
     return torch.exp(-error / 0.025)
+
+
+def balance_height_command_tracking(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _LINEAR_CFG,
+) -> torch.Tensor:
+    return height_command_tracking(env, asset_cfg) * (1.0 - _jump_active(env))
+
+
+def balance_linear_velocity_l2(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _LINEAR_CFG,
+) -> torch.Tensor:
+    return linear_velocity_l2(env, asset_cfg) * (1.0 - _jump_active(env))
+
+
+def jump_apex_progress(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return _jump_term(env).apex_progress_delta
+
+
+def jump_target_reached(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return _jump_term(env).target_reached_event
+
+
+def takeoff_upward_velocity(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _ROBOT_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    takeoff = (_jump_term(env).phase == PHASE_TAKEOFF).float()
+    return takeoff * torch.clamp(
+        asset.data.root_link_lin_vel_w[:, 2] / 3.0,
+        0.0,
+        1.0,
+    )
+
+
+def airborne_upright(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    flight = (_jump_term(env).phase == PHASE_FLIGHT).float()
+    return flight * upright_stability(env)
+
+
+def landing_quality(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return _jump_term(env).landing_quality_event
+
+
+def landing_impact(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return _jump_term(env).landing_impact_event
+
+
+def stable_recovery(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    term = _jump_term(env)
+    return (
+        (term.phase == PHASE_RECOVERY)
+        & (term.stable_time > 0.0)
+    ).float()
+
+
+def jump_completed(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return _jump_term(env).completed_event
+
+
+def jump_missed(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return _jump_term(env).missed_event
 
 
 def fell_over(env: "ManagerBasedRlEnv") -> torch.Tensor:
@@ -138,6 +224,7 @@ def fell_over(env: "ManagerBasedRlEnv") -> torch.Tensor:
 def build_reward_terms(
     height_control: bool = False,
     jump_stage_one: bool = False,
+    jump_stage_two: bool = False,
 ) -> dict[str, RewardTermCfg]:
     terms = {
         "alive": RewardTermCfg(func=envs_mdp.is_alive, weight=1.0),
@@ -189,7 +276,7 @@ def build_reward_terms(
             weight=2.0,
             params={"asset_cfg": _LINEAR_CFG},
         )
-    if jump_stage_one:
+    if jump_stage_one or jump_stage_two:
         terms["linear_velocity_action"] = RewardTermCfg(
             func=linear_velocity_action_l2,
             weight=-0.001,
@@ -198,8 +285,46 @@ def build_reward_terms(
             func=linear_velocity_action_rate_l2,
             weight=-0.002,
         )
-        terms["off_ground"] = RewardTermCfg(
-            func=off_ground,
-            weight=-2.0,
+        terms["off_ground"] = RewardTermCfg(func=off_ground, weight=-2.0)
+    if jump_stage_two:
+        terms["linear_velocity"].func = balance_linear_velocity_l2
+        terms["height_tracking"].func = balance_height_command_tracking
+        terms["off_ground"].func = balance_off_ground
+        terms["jump_apex_progress"] = RewardTermCfg(
+            func=jump_apex_progress,
+            weight=10_000.0,
+        )
+        terms["jump_target_reached"] = RewardTermCfg(
+            func=jump_target_reached,
+            weight=5_000.0,
+        )
+        terms["takeoff_upward_velocity"] = RewardTermCfg(
+            func=takeoff_upward_velocity,
+            weight=1.0,
+            params={"asset_cfg": _ROBOT_CFG},
+        )
+        terms["airborne_upright"] = RewardTermCfg(
+            func=airborne_upright,
+            weight=3.0,
+        )
+        terms["landing_quality"] = RewardTermCfg(
+            func=landing_quality,
+            weight=5_000.0,
+        )
+        terms["landing_impact"] = RewardTermCfg(
+            func=landing_impact,
+            weight=-2_000.0,
+        )
+        terms["stable_recovery"] = RewardTermCfg(
+            func=stable_recovery,
+            weight=5.0,
+        )
+        terms["jump_completed"] = RewardTermCfg(
+            func=jump_completed,
+            weight=10_000.0,
+        )
+        terms["jump_missed"] = RewardTermCfg(
+            func=jump_missed,
+            weight=-5_000.0,
         )
     return terms

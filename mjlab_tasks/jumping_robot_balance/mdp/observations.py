@@ -13,6 +13,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from mjlab_tasks.jumping_robot_balance.mdp.commands import HEIGHT_COMMAND_NAME
 from mjlab_tasks.jumping_robot_balance.mdp.contact import foot_ground_contact
+from mjlab_tasks.jumping_robot_balance.mdp.jump_commands import JUMP_COMMAND_NAME
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FLYWHEEL_X_JOINT,
     FLYWHEEL_Y_JOINT,
@@ -86,6 +87,7 @@ def _normalized_linear_velocity_target(
 def build_observation_groups(
     height_control: bool = False,
     jump_stage_one: bool = False,
+    jump_stage_two: bool = False,
 ) -> dict[str, ObservationGroupCfg]:
     actor_terms = {
         "projected_gravity": ObservationTermCfg(
@@ -117,12 +119,17 @@ def build_observation_groups(
         actor_terms["linear_position_target"] = ObservationTermCfg(
             func=_normalized_linear_position_target,
         )
-    if jump_stage_one:
+    if jump_stage_one or jump_stage_two:
         actor_terms["linear_velocity_target"] = ObservationTermCfg(
             func=_normalized_linear_velocity_target,
         )
         actor_terms["foot_contact"] = ObservationTermCfg(
             func=foot_ground_contact,
+        )
+    if jump_stage_two:
+        actor_terms["jump_command"] = ObservationTermCfg(
+            func=envs_mdp.generated_commands,
+            params={"command_name": JUMP_COMMAND_NAME},
         )
 
     return {

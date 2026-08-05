@@ -22,6 +22,7 @@ def main() -> None:
     from mjlab_tasks.jumping_robot_balance.task_registry import (
         HEIGHT_TASK_ID,
         JUMP_STAGE_ONE_TASK_ID,
+        JUMP_STAGE_TWO_TASK_ID,
         TASK_ID,
         register_tasks,
     )
@@ -45,6 +46,11 @@ def main() -> None:
         action="store_true",
         help="Use the five-action jump Stage 1 task.",
     )
+    mode.add_argument(
+        "--jump-stage-2",
+        action="store_true",
+        help="Use the vertical-hop Stage 2 task and one-shot jump command.",
+    )
     args = parser.parse_args()
 
     register_tasks()
@@ -58,7 +64,9 @@ def main() -> None:
         viewer=args.viewer,
         no_terminations=args.no_terminations,
     )
-    if args.jump_stage_1:
+    if args.jump_stage_2:
+        task_id = JUMP_STAGE_TWO_TASK_ID
+    elif args.jump_stage_1:
         task_id = JUMP_STAGE_ONE_TASK_ID
     elif args.height_control:
         task_id = HEIGHT_TASK_ID

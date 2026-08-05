@@ -122,3 +122,9 @@ def build_height_robustness_events() -> dict[str, EventTermCfg]:
         mode="reset",
     )
     return events
+
+
+def build_jump_stage_two_events() -> dict[str, EventTermCfg]:
+    events = build_height_robustness_events()
+    del events["push_disturbance"]
+    return events
