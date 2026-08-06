@@ -102,7 +102,7 @@ def main() -> None:
         cfg.env.events = build_jump_stage_two_events()
         cfg.agent.algorithm.learning_rate = 5.0e-5
         cfg.agent.algorithm.schedule = "fixed"
-        cfg.agent.algorithm.entropy_coef = 1.0e-3
+        cfg.agent.algorithm.entropy_coef = 2.0e-4
         cfg.agent.run_name = "jump_stage_2"
 
     if args.resume_from is not None:

@@ -15,10 +15,7 @@ from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from mjlab_tasks.jumping_robot_balance.mdp.contact import foot_ground_contact
-from mjlab_tasks.jumping_robot_balance.mdp.jump_curriculum import (
-    JUMP_HEIGHT_SCHEDULE,
-    scheduled_jump_height,
-)
+from mjlab_tasks.jumping_robot_balance.mdp.jump_curriculum import JUMP_HEIGHT_LEVELS
 from mjlab_tasks.jumping_robot_balance.robot_cfg import ROBOT_ENTITY_NAME
 
 if TYPE_CHECKING:
@@ -56,7 +53,7 @@ class JumpCommand(CommandTerm):
         self.baseline_height = torch.zeros(self.num_envs, device=self.device)
         self.target_height = torch.full(
             (self.num_envs,),
-            self.cfg.height_schedule[0][1],
+            self.cfg.height_levels[-1 if self.cfg.play else 0],
             device=self.device,
         )
         self.apex_height = torch.zeros(self.num_envs, device=self.device)
@@ -80,13 +77,48 @@ class JumpCommand(CommandTerm):
             self.num_envs,
             device=self.device,
         )
+        self.metrics["curriculum_height"] = torch.zeros(
+            self.num_envs,
+            device=self.device,
+        )
+        self.curriculum_stage = (
+            len(self.cfg.height_levels) - 1 if self.cfg.play else 0
+        )
+        self.curriculum_stage_steps = 0
+        self._window_attempts = torch.zeros(
+            (),
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._window_successes = torch.zeros_like(self._window_attempts)
 
     @property
     def command(self) -> torch.Tensor:
         return self._command
 
     def _update_metrics(self) -> None:
-        pass
+        self.metrics["curriculum_height"].fill_(
+            self.cfg.height_levels[self.curriculum_stage]
+        )
+
+    def curriculum_state(self) -> dict[str, int]:
+        return {
+            "stage": self.curriculum_stage,
+            "stage_steps": self.curriculum_stage_steps,
+            "window_attempts": int(self._window_attempts.item()),
+            "window_successes": int(self._window_successes.item()),
+        }
+
+    def load_curriculum_state(self, state: dict[str, int]) -> None:
+        if self.cfg.play:
+            return
+        stage = state["stage"]
+        if not 0 <= stage < len(self.cfg.height_levels):
+            raise ValueError(f"Invalid jump curriculum stage: {stage}")
+        self.curriculum_stage = stage
+        self.curriculum_stage_steps = state["stage_steps"]
+        self._window_attempts.fill_(state["window_attempts"])
+        self._window_successes.fill_(state["window_successes"])
 
     def _resample_command(self, env_ids: torch.Tensor) -> None:
         self._clear_jump(env_ids, schedule_next=False)
@@ -114,10 +146,13 @@ class JumpCommand(CommandTerm):
         self._update_takeoff(contact)
         self._update_flight(contact)
         self._update_recovery(contact)
+        self._update_curriculum()
         self._update_command_tensor()
 
     def compute(self, dt: float) -> None:
         self._update_metrics()
+        if not self.cfg.play:
+            self.curriculum_stage_steps += 1
         inactive = self.phase == PHASE_BALANCE
         self.time_left[inactive] -= dt
         self.phase_time[~inactive] += dt
@@ -135,10 +170,7 @@ class JumpCommand(CommandTerm):
         self.stable_time[env_ids] = 0.0
         self.airborne_time[env_ids] = 0.0
         self.baseline_height[env_ids] = self._robot.data.root_link_pos_w[env_ids, 2]
-        self.target_height[env_ids] = scheduled_jump_height(
-            self._env.common_step_counter,
-            self.cfg.height_schedule,
-        )
+        self.target_height[env_ids] = self.cfg.height_levels[self.curriculum_stage]
         self.apex_height[env_ids] = 0.0
         self.reached_target[env_ids] = False
         self.command_counter[env_ids] += 1
@@ -189,9 +221,10 @@ class JumpCommand(CommandTerm):
                 self._robot.data.root_link_ang_vel_b,
                 dim=1,
             )
-            self.landing_quality_event[landed] = torch.exp(
-                -torch.square(vertical_speed[landed] / 0.5)
-                - torch.square(angular_speed[landed] / 1.0)
+            rewarded_landing = landed & self.reached_target
+            self.landing_quality_event[rewarded_landing] = torch.exp(
+                -torch.square(vertical_speed[rewarded_landing] / 0.5)
+                - torch.square(angular_speed[rewarded_landing] / 1.0)
             )
             self.landing_impact_event[landed] = torch.clamp(
                 vertical_speed[landed] / 2.0,
@@ -206,6 +239,49 @@ class JumpCommand(CommandTerm):
         )
         self.missed_event[timed_out] = 1.0
         self._clear_jump(timed_out.nonzero().flatten())
+
+    def _update_curriculum(self) -> None:
+        if self.cfg.play:
+            return
+        completed = self.completed_event > 0.0
+        missed = self.missed_event > 0.0
+        self._window_attempts += torch.count_nonzero(completed | missed)
+        self._window_successes += torch.count_nonzero(completed)
+
+        if (
+            self.curriculum_stage >= len(self.cfg.height_levels) - 1
+            or self.curriculum_stage_steps < self.cfg.minimum_stage_steps
+            or (
+                self._env.common_step_counter
+                % self.cfg.curriculum_check_interval
+                != 0
+            )
+            or self._window_attempts < self.cfg.minimum_window_attempts
+        ):
+            return
+
+        attempts = int(self._window_attempts.item())
+        successes = int(self._window_successes.item())
+        success_rate = successes / attempts
+        if success_rate >= self.cfg.advance_success_rate:
+            self.curriculum_stage += 1
+            self.curriculum_stage_steps = 0
+            print(
+                "[INFO]: Jump curriculum advanced to "
+                f"{100.0 * self.cfg.height_levels[self.curriculum_stage]:.0f} cm "
+                f"after {successes}/{attempts} successful landings."
+            )
+        self._window_attempts.zero_()
+        self._window_successes.zero_()
+
+    def reset(
+        self,
+        env_ids: torch.Tensor | slice | None,
+    ) -> dict[str, float]:
+        if isinstance(env_ids, torch.Tensor) and not self.cfg.play:
+            interrupted = self.phase[env_ids] != PHASE_BALANCE
+            self._window_attempts += torch.count_nonzero(interrupted)
+        return super().reset(env_ids)
 
     def _update_recovery(self, contact: torch.Tensor) -> None:
         recovery = self.phase == PHASE_RECOVERY
@@ -297,7 +373,11 @@ class JumpCommand(CommandTerm):
 @dataclass(kw_only=True)
 class JumpCommandCfg(CommandTermCfg):
     play: bool = False
-    height_schedule: tuple[tuple[int, float], ...] = JUMP_HEIGHT_SCHEDULE
+    height_levels: tuple[float, ...] = JUMP_HEIGHT_LEVELS
+    minimum_stage_steps: int = 64_000
+    minimum_window_attempts: int = 4_096
+    advance_success_rate: float = 0.60
+    curriculum_check_interval: int = 1_000
     trigger_interval_s: tuple[float, float] = (2.0, 4.0)
     liftoff_debounce_s: float = 0.010
     takeoff_timeout_s: float = 1.0

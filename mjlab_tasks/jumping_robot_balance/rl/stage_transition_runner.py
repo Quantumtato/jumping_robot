@@ -6,6 +6,11 @@ import torch
 
 from mjlab.rl.runner import MjlabOnPolicyRunner
 
+from mjlab_tasks.jumping_robot_balance.mdp.jump_commands import (
+    JUMP_COMMAND_NAME,
+    JumpCommand,
+)
+
 
 class JumpStageTwoRunner(MjlabOnPolicyRunner):
     """Warm-start Stage 2 while zero-initializing its new command inputs."""
@@ -21,7 +26,9 @@ class JumpStageTwoRunner(MjlabOnPolicyRunner):
         source_dim = loaded["actor_state_dict"]["mlp.0.weight"].shape[1]
         target_dim = self.alg._raw_actor.state_dict()["mlp.0.weight"].shape[1]
         if source_dim == target_dim:
-            return super().load(path, load_cfg, strict, map_location)
+            infos = super().load(path, load_cfg, strict, map_location)
+            self._restore_curriculum(infos)
+            return infos
         if source_dim > target_dim:
             raise ValueError(
                 f"Checkpoint has {source_dim} observations, but the Stage 2 "
@@ -52,6 +59,25 @@ class JumpStageTwoRunner(MjlabOnPolicyRunner):
             "exploration is at least 0.5."
         )
         return loaded.get("infos") or {}
+
+    def save(self, path: str, infos=None) -> None:
+        term = self.env.unwrapped.command_manager.get_term(JUMP_COMMAND_NAME)
+        if not isinstance(term, JumpCommand):
+            raise TypeError(f"Expected JumpCommand, received {type(term).__name__}.")
+        infos = {
+            **(infos or {}),
+            "jump_curriculum": term.curriculum_state(),
+        }
+        super().save(path, infos)
+
+    def _restore_curriculum(self, infos: dict) -> None:
+        state = infos.get("jump_curriculum")
+        if state is None:
+            return
+        term = self.env.unwrapped.command_manager.get_term(JUMP_COMMAND_NAME)
+        if not isinstance(term, JumpCommand):
+            raise TypeError(f"Expected JumpCommand, received {type(term).__name__}.")
+        term.load_curriculum_state(state)
 
     @staticmethod
     def _expand_model_inputs(

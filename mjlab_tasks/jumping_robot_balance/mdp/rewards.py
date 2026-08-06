@@ -202,6 +202,7 @@ def stable_recovery(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return (
         (term.phase == PHASE_RECOVERY)
         & (term.stable_time > 0.0)
+        & term.reached_target
     ).float()
 
 
@@ -287,6 +288,7 @@ def build_reward_terms(
         )
         terms["off_ground"] = RewardTermCfg(func=off_ground, weight=-2.0)
     if jump_stage_two:
+        terms["fall_event"].weight = -20_000.0
         terms["linear_velocity"].func = balance_linear_velocity_l2
         terms["height_tracking"].func = balance_height_command_tracking
         terms["off_ground"].func = balance_off_ground
@@ -325,6 +327,6 @@ def build_reward_terms(
         )
         terms["jump_missed"] = RewardTermCfg(
             func=jump_missed,
-            weight=-5_000.0,
+            weight=-15_000.0,
         )
     return terms
