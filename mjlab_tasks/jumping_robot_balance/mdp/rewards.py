@@ -17,8 +17,9 @@ from mjlab_tasks.jumping_robot_balance.mdp.contact import foot_ground_contact
 from mjlab_tasks.jumping_robot_balance.mdp.jump_commands import (
     JUMP_COMMAND_NAME,
     PHASE_FLIGHT,
+    PHASE_PRELOAD,
     PHASE_RECOVERY,
-    PHASE_TAKEOFF,
+    PHASE_THRUST,
     JumpCommand,
 )
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
@@ -26,6 +27,8 @@ from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FLYWHEEL_X_JOINT,
     FLYWHEEL_Y_JOINT,
     LINEAR_JOINT,
+    LINEAR_RANGE_MAX_M,
+    LINEAR_RANGE_MIN_M,
     MAX_FLYWHEEL_SPEED_RAD_S,
     ROBOT_ENTITY_NAME,
 )
@@ -176,8 +179,8 @@ def takeoff_upward_velocity(
     asset_cfg: SceneEntityCfg = _ROBOT_CFG,
 ) -> torch.Tensor:
     asset: Entity = env.scene[asset_cfg.name]
-    takeoff = (_jump_term(env).phase == PHASE_TAKEOFF).float()
-    return takeoff * torch.clamp(
+    thrust = (_jump_term(env).phase == PHASE_THRUST).float()
+    return thrust * torch.clamp(
         asset.data.root_link_lin_vel_w[:, 2] / 3.0,
         0.0,
         1.0,
@@ -187,6 +190,44 @@ def takeoff_upward_velocity(
 def airborne_upright(env: "ManagerBasedRlEnv") -> torch.Tensor:
     flight = (_jump_term(env).phase == PHASE_FLIGHT).float()
     return flight * upright_stability(env)
+
+
+def preload_position_tracking(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _LINEAR_CFG,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    position = asset.data.joint_pos[:, asset_cfg.joint_ids]
+    preload = (_jump_term(env).phase == PHASE_PRELOAD).float()
+    compression = torch.clamp(
+        (LINEAR_RANGE_MAX_M - position)
+        / (LINEAR_RANGE_MAX_M - LINEAR_RANGE_MIN_M),
+        min=0.0,
+        max=1.0,
+    )
+    return preload * torch.mean(compression, dim=1)
+
+
+def thrust_extension_progress(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return _jump_term(env).thrust_progress_delta
+
+
+def thrust_position_tracking(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    term = _jump_term(env)
+    return (term.phase == PHASE_THRUST).float() * term.thrust_progress
+
+
+def preload_position_action_error(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    action_index = _linear_action_start(env)
+    preload = (_jump_term(env).phase == PHASE_PRELOAD).float()
+    return preload * torch.square(env.action_manager.action[:, action_index] + 1.0)
+
+
+def thrust_action_error(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    action_index = _linear_action_start(env)
+    linear_actions = env.action_manager.action[:, action_index:]
+    thrust = (_jump_term(env).phase == PHASE_THRUST).float()
+    return thrust * torch.sum(torch.square(linear_actions - 1.0), dim=1)
 
 
 def landing_quality(env: "ManagerBasedRlEnv") -> torch.Tensor:
@@ -288,13 +329,34 @@ def build_reward_terms(
         )
         terms["off_ground"] = RewardTermCfg(func=off_ground, weight=-2.0)
     if jump_stage_two:
-        terms["fall_event"].weight = -20_000.0
+        terms["fall_event"].weight = -2_000.0
         terms["linear_velocity"].func = balance_linear_velocity_l2
         terms["height_tracking"].func = balance_height_command_tracking
         terms["off_ground"].func = balance_off_ground
         terms["jump_apex_progress"] = RewardTermCfg(
             func=jump_apex_progress,
             weight=10_000.0,
+        )
+        terms["preload_position_tracking"] = RewardTermCfg(
+            func=preload_position_tracking,
+            weight=20.0,
+            params={"asset_cfg": _LINEAR_CFG},
+        )
+        terms["thrust_extension_progress"] = RewardTermCfg(
+            func=thrust_extension_progress,
+            weight=5_000.0,
+        )
+        terms["thrust_position_tracking"] = RewardTermCfg(
+            func=thrust_position_tracking,
+            weight=20.0,
+        )
+        terms["preload_position_action_error"] = RewardTermCfg(
+            func=preload_position_action_error,
+            weight=-5.0,
+        )
+        terms["thrust_action_error"] = RewardTermCfg(
+            func=thrust_action_error,
+            weight=-5.0,
         )
         terms["jump_target_reached"] = RewardTermCfg(
             func=jump_target_reached,

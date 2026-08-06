@@ -16,7 +16,12 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from mjlab_tasks.jumping_robot_balance.mdp.contact import foot_ground_contact
 from mjlab_tasks.jumping_robot_balance.mdp.jump_curriculum import JUMP_HEIGHT_LEVELS
-from mjlab_tasks.jumping_robot_balance.robot_cfg import ROBOT_ENTITY_NAME
+from mjlab_tasks.jumping_robot_balance.robot_cfg import (
+    LINEAR_JOINT,
+    LINEAR_RANGE_MAX_M,
+    LINEAR_RANGE_MIN_M,
+    ROBOT_ENTITY_NAME,
+)
 
 if TYPE_CHECKING:
     import viser
@@ -26,9 +31,10 @@ if TYPE_CHECKING:
 JUMP_COMMAND_NAME = "jump"
 
 PHASE_BALANCE = 0
-PHASE_TAKEOFF = 1
-PHASE_FLIGHT = 2
-PHASE_RECOVERY = 3
+PHASE_PRELOAD = 1
+PHASE_THRUST = 2
+PHASE_FLIGHT = 3
+PHASE_RECOVERY = 4
 
 _ROBOT_CFG = SceneEntityCfg(ROBOT_ENTITY_NAME)
 
@@ -41,6 +47,10 @@ class JumpCommand(CommandTerm):
     def __init__(self, cfg: JumpCommandCfg, env: ManagerBasedRlEnv):
         super().__init__(cfg, env)
         self._robot: Entity = env.scene[_ROBOT_CFG.name]
+        linear_ids, linear_names = self._robot.find_joints(LINEAR_JOINT)
+        if len(linear_ids) != 1:
+            raise ValueError(f"Expected one linear joint, found {linear_names}.")
+        self._linear_id = linear_ids[0]
         self._command = torch.zeros((self.num_envs, 4), device=self.device)
         self.phase = torch.zeros(
             self.num_envs,
@@ -63,6 +73,8 @@ class JumpCommand(CommandTerm):
             device=self.device,
         )
         self.apex_progress_delta = torch.zeros(self.num_envs, device=self.device)
+        self.thrust_progress = torch.zeros(self.num_envs, device=self.device)
+        self.thrust_progress_delta = torch.zeros(self.num_envs, device=self.device)
         self.target_reached_event = torch.zeros(self.num_envs, device=self.device)
         self.landing_quality_event = torch.zeros(self.num_envs, device=self.device)
         self.landing_impact_event = torch.zeros(self.num_envs, device=self.device)
@@ -78,6 +90,10 @@ class JumpCommand(CommandTerm):
             device=self.device,
         )
         self.metrics["curriculum_height"] = torch.zeros(
+            self.num_envs,
+            device=self.device,
+        )
+        self.metrics["preload_tolerance"] = torch.zeros(
             self.num_envs,
             device=self.device,
         )
@@ -99,6 +115,9 @@ class JumpCommand(CommandTerm):
     def _update_metrics(self) -> None:
         self.metrics["curriculum_height"].fill_(
             self.cfg.height_levels[self.curriculum_stage]
+        )
+        self.metrics["preload_tolerance"].fill_(
+            self.cfg.preload_position_tolerances_m[self.curriculum_stage]
         )
 
     def curriculum_state(self) -> dict[str, int]:
@@ -143,7 +162,8 @@ class JumpCommand(CommandTerm):
             self._trigger(auto_trigger.nonzero().flatten())
 
         contact = foot_ground_contact(self._env)[:, 0] > 0.5
-        self._update_takeoff(contact)
+        self._update_preload(contact)
+        self._update_thrust(contact)
         self._update_flight(contact)
         self._update_recovery(contact)
         self._update_curriculum()
@@ -165,25 +185,83 @@ class JumpCommand(CommandTerm):
         env_ids = env_ids[inactive]
         if len(env_ids) == 0:
             return
-        self.phase[env_ids] = PHASE_TAKEOFF
+        self.phase[env_ids] = PHASE_PRELOAD
         self.phase_time[env_ids] = 0.0
         self.stable_time[env_ids] = 0.0
         self.airborne_time[env_ids] = 0.0
         self.baseline_height[env_ids] = self._robot.data.root_link_pos_w[env_ids, 2]
         self.target_height[env_ids] = self.cfg.height_levels[self.curriculum_stage]
         self.apex_height[env_ids] = 0.0
+        self.thrust_progress[env_ids] = 0.0
         self.reached_target[env_ids] = False
         self.command_counter[env_ids] += 1
 
-    def _update_takeoff(self, contact: torch.Tensor) -> None:
-        takeoff = self.phase == PHASE_TAKEOFF
-        self.airborne_time[takeoff & ~contact] += self._env.step_dt
-        self.airborne_time[takeoff & contact] = 0.0
-        lifted = takeoff & (self.airborne_time >= self.cfg.liftoff_debounce_s)
+    def _update_preload(self, contact: torch.Tensor) -> None:
+        preload = self.phase == PHASE_PRELOAD
+        self.airborne_time[preload & ~contact] += self._env.step_dt
+        self.airborne_time[preload & contact] = 0.0
+        lost_contact = preload & (
+            self.airborne_time >= self.cfg.liftoff_debounce_s
+        )
+        self.missed_event[lost_contact] = 1.0
+        self._clear_jump(lost_contact.nonzero().flatten())
+
+        linear_position = self._robot.data.joint_pos[:, self._linear_id]
+        preload_tolerance = self.cfg.preload_position_tolerances_m[
+            self.curriculum_stage
+        ]
+        preloaded = (
+            preload
+            & ~lost_contact
+            & (
+                linear_position
+                <= LINEAR_RANGE_MIN_M + preload_tolerance
+            )
+        )
+        self.phase[preloaded] = PHASE_THRUST
+        self.phase_time[preloaded] = 0.0
+        self.airborne_time[preloaded] = 0.0
+        self.thrust_progress[preloaded] = torch.clamp(
+            (
+                linear_position[preloaded]
+                - LINEAR_RANGE_MIN_M
+            )
+            / (LINEAR_RANGE_MAX_M - LINEAR_RANGE_MIN_M),
+            min=0.0,
+            max=1.0,
+        )
+
+        timed_out = preload & (
+            self.phase_time >= self.cfg.preload_timeout_s
+        )
+        self.missed_event[timed_out] = 1.0
+        self._clear_jump(timed_out.nonzero().flatten())
+
+    def _update_thrust(self, contact: torch.Tensor) -> None:
+        thrust = self.phase == PHASE_THRUST
+        linear_position = self._robot.data.joint_pos[:, self._linear_id]
+        progress = torch.clamp(
+            (linear_position - LINEAR_RANGE_MIN_M)
+            / (LINEAR_RANGE_MAX_M - LINEAR_RANGE_MIN_M),
+            min=0.0,
+            max=1.0,
+        )
+        self.thrust_progress_delta[thrust] = torch.clamp(
+            progress[thrust] - self.thrust_progress[thrust],
+            min=0.0,
+        )
+        self.thrust_progress[thrust] = torch.maximum(
+            self.thrust_progress[thrust],
+            progress[thrust],
+        )
+
+        self.airborne_time[thrust & ~contact] += self._env.step_dt
+        self.airborne_time[thrust & contact] = 0.0
+        lifted = thrust & (self.airborne_time >= self.cfg.liftoff_debounce_s)
         self.phase[lifted] = PHASE_FLIGHT
         self.phase_time[lifted] = 0.0
 
-        missed = takeoff & (self.phase_time >= self.cfg.takeoff_timeout_s)
+        missed = thrust & (self.phase_time >= self.cfg.thrust_timeout_s)
         self.missed_event[missed] = 1.0
         self._clear_jump(missed.nonzero().flatten())
 
@@ -334,6 +412,7 @@ class JumpCommand(CommandTerm):
 
     def _clear_events(self) -> None:
         self.apex_progress_delta.zero_()
+        self.thrust_progress_delta.zero_()
         self.target_reached_event.zero_()
         self.landing_quality_event.zero_()
         self.landing_impact_event.zero_()
@@ -380,13 +459,19 @@ class JumpCommandCfg(CommandTermCfg):
     curriculum_check_interval: int = 1_000
     trigger_interval_s: tuple[float, float] = (2.0, 4.0)
     liftoff_debounce_s: float = 0.010
-    takeoff_timeout_s: float = 1.0
+    preload_position_tolerances_m: tuple[float, ...] = (0.060, 0.035, 0.010)
+    preload_timeout_s: float = 2.0
+    thrust_timeout_s: float = 3.0
     flight_timeout_s: float = 1.5
     recovery_time_s: float = 0.5
     recovery_timeout_s: float = 2.0
     resampling_time_range: tuple[float, float] = (2.0, 4.0)
 
     def build(self, env: ManagerBasedRlEnv) -> JumpCommand:
+        if len(self.preload_position_tolerances_m) != len(self.height_levels):
+            raise ValueError(
+                "Each jump-height curriculum level requires one preload tolerance."
+            )
         return JumpCommand(self, env)
 
 
