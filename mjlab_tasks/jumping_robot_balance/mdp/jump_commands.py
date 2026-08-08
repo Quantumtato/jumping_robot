@@ -73,6 +73,7 @@ class JumpCommand(CommandTerm):
         self.was_airborne = torch.zeros_like(self.has_triggered)
         self.has_landed = torch.zeros_like(self.has_triggered)
         self.landing_event = torch.zeros(self.num_envs, device=self.device)
+        self.airborne_time = torch.zeros(self.num_envs, device=self.device)
         self.landing_recovery_time = torch.zeros(
             self.num_envs,
             device=self.device,
@@ -196,6 +197,7 @@ class JumpCommand(CommandTerm):
         self.was_airborne[env_ids] = False
         self.has_landed[env_ids] = False
         self.landing_event[env_ids] = 0.0
+        self.airborne_time[env_ids] = 0.0
         self.landing_recovery_time[env_ids] = 0.0
         self.landing_recovery_complete[env_ids] = False
         self.landing_recovery_success_event[env_ids] = 0.0
@@ -232,6 +234,11 @@ class JumpCommand(CommandTerm):
             self._trigger(auto_trigger.nonzero().flatten())
 
         contact = foot_ground_contact(self._env)[:, 0] > 0.5
+        self.airborne_time[contact] = 0.0
+        self.airborne_time[~contact] = torch.clamp(
+            self.airborne_time[~contact] + dt,
+            max=self.cfg.airborne_time_observation_max_s,
+        )
         tracking_landing = self.has_triggered & ~self.has_landed
         self.was_airborne |= tracking_landing & ~contact
         touchdown = tracking_landing & self.was_airborne & contact
@@ -340,6 +347,7 @@ class JumpCommand(CommandTerm):
         self.was_airborne[env_ids] = False
         self.has_landed[env_ids] = False
         self.landing_event[env_ids] = 0.0
+        self.airborne_time[env_ids] = 0.0
         self.landing_recovery_time[env_ids] = 0.0
         self.landing_recovery_complete[env_ids] = False
         self.landing_recovery_success_event[env_ids] = 0.0
@@ -393,6 +401,7 @@ class JumpCommandCfg(CommandTermCfg):
     landing_recovery_duration_s: float = 0.5
     landing_recovery_max_tilt_deg: float = 12.0
     landing_recovery_max_ang_vel_rad_s: float = 3.0
+    airborne_time_observation_max_s: float = 1.0
 
     def build(self, env: ManagerBasedRlEnv) -> JumpCommand:
         return JumpCommand(self, env)

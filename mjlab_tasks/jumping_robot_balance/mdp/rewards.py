@@ -160,11 +160,32 @@ def balance_height_command_tracking(
     return height_command_tracking(env, asset_cfg) * (1.0 - _jump_active(env))
 
 
+def pre_jump_height_command_tracking(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _LINEAR_CFG,
+) -> torch.Tensor:
+    term = _jump_term(env)
+    return height_command_tracking(env, asset_cfg) * (~term.has_triggered)
+
+
 def balance_linear_velocity_l2(
     env: "ManagerBasedRlEnv",
     asset_cfg: SceneEntityCfg = _LINEAR_CFG,
 ) -> torch.Tensor:
     return _balance_only(env, linear_velocity_l2(env, asset_cfg))
+
+
+def pre_jump_linear_velocity_l2(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _LINEAR_CFG,
+) -> torch.Tensor:
+    term = _jump_term(env)
+    return linear_velocity_l2(env, asset_cfg) * (~term.has_triggered)
+
+
+def pre_jump_linear_velocity_action_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    term = _jump_term(env)
+    return linear_velocity_action_l2(env) * (~term.has_triggered)
 
 
 def jump_apex_progress(env: "ManagerBasedRlEnv") -> torch.Tensor:
@@ -305,9 +326,23 @@ def build_reward_terms(
             balance_linear_velocity_action_rate_l2
         )
         terms["off_ground"].func = balance_off_ground
+        terms["pre_jump_height_tracking"] = RewardTermCfg(
+            func=pre_jump_height_command_tracking,
+            weight=8.0,
+            params={"asset_cfg": _LINEAR_CFG},
+        )
+        terms["pre_jump_linear_velocity"] = RewardTermCfg(
+            func=pre_jump_linear_velocity_l2,
+            weight=-0.05,
+            params={"asset_cfg": _LINEAR_CFG},
+        )
+        terms["pre_jump_linear_velocity_action"] = RewardTermCfg(
+            func=pre_jump_linear_velocity_action_l2,
+            weight=-0.02,
+        )
         terms["jump_apex_progress"] = RewardTermCfg(
             func=jump_apex_progress,
-            weight=10_000.0,
+            weight=100_000.0,
         )
         terms["landing_recovery_success"] = RewardTermCfg(
             func=landing_recovery_success,

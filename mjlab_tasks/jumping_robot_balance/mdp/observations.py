@@ -136,6 +136,13 @@ def _flight_phase_history_state(env: "ManagerBasedRlEnv") -> torch.Tensor:
     )
 
 
+def _airborne_time(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    term = env.command_manager.get_term(JUMP_COMMAND_NAME)
+    if not isinstance(term, JumpCommand):
+        raise TypeError(f"Expected JumpCommand, received {type(term).__name__}.")
+    return term.airborne_time.unsqueeze(1)
+
+
 def build_observation_groups(
     height_control: bool = False,
     jump_stage_one: bool = False,
@@ -185,7 +192,10 @@ def build_observation_groups(
         )
         actor_terms["flight_phase_history"] = ObservationTermCfg(
             func=_flight_phase_history_state,
-            history_length=100,
+            history_length=8,
+        )
+        actor_terms["airborne_time"] = ObservationTermCfg(
+            func=_airborne_time,
         )
 
     critic_terms = {**actor_terms}

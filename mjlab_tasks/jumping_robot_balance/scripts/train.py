@@ -101,7 +101,7 @@ def main() -> None:
         )
 
         cfg.env.events = build_jump_stage_two_events()
-        cfg.agent.algorithm.learning_rate = 5.0e-5
+        cfg.agent.algorithm.learning_rate = 2.5e-5
         cfg.agent.algorithm.schedule = "fixed"
         cfg.agent.algorithm.entropy_coef = 2.0e-4
         cfg.agent.run_name = "jump_stage_2"
