@@ -58,7 +58,9 @@ def jumping_robot_balance_env_cfg(
             jump_stage_two=jump_stage_two,
         ),
         actions=(
-            build_jump_stage_one_action_terms()
+            build_jump_stage_one_action_terms(
+                gate_with_jump_command=jump_stage_two,
+            )
             if jump_stage_one
             else (
                 build_height_action_terms(play=play)

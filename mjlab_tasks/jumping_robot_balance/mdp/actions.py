@@ -14,6 +14,7 @@ from mjlab_tasks.jumping_robot_balance.mdp.commands import HEIGHT_COMMAND_NAME
 from mjlab_tasks.jumping_robot_balance.mdp.height_curriculum import (
     scheduled_height_half_width,
 )
+from mjlab_tasks.jumping_robot_balance.mdp.jump_commands import JUMP_COMMAND_NAME
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FLYWHEEL_X_JOINT,
     FLYWHEEL_Y_JOINT,
@@ -93,6 +94,15 @@ class LinearMitAction(ActionTerm):
 
     def process_actions(self, actions: torch.Tensor) -> None:
         self._raw_actions[:] = actions
+        action_gate = 1.0
+        if self.cfg.activation_command_name is not None:
+            action_gate = torch.clamp(
+                self._env.command_manager.get_command(
+                    self.cfg.activation_command_name
+                ),
+                min=0.0,
+                max=1.0,
+            )
         half_width = scheduled_height_half_width(
             self._env.common_step_counter,
             self.cfg.position_scale_schedule,
@@ -106,7 +116,7 @@ class LinearMitAction(ActionTerm):
                 self.cfg.position_command_name
             )
         desired_position = torch.clamp(
-            position_center + actions[:, :1] * half_width,
+            position_center + actions[:, :1] * half_width * action_gate,
             min=LINEAR_RANGE_MIN_M,
             max=LINEAR_RANGE_MAX_M,
         )
@@ -128,7 +138,9 @@ class LinearMitAction(ActionTerm):
                 * torch.abs(normalized_velocity) ** self.cfg.velocity_target_exponent
             )
             self._velocity_target[:] = (
-                normalized_velocity * self.cfg.velocity_target_scale_m_s
+                normalized_velocity
+                * self.cfg.velocity_target_scale_m_s
+                * action_gate
             )
             action_index += 1
         else:
@@ -144,7 +156,9 @@ class LinearMitAction(ActionTerm):
                 * torch.abs(normalized_force) ** self.cfg.feedforward_exponent
             )
             self._feedforward_force[:] = (
-                normalized_force * self.cfg.feedforward_force_scale_n
+                normalized_force
+                * self.cfg.feedforward_force_scale_n
+                * action_gate
             )
         else:
             self._feedforward_force.zero_()
@@ -194,6 +208,7 @@ class LinearMitActionCfg(ActionTermCfg):
     feedforward_force_scale_n: float = LINEAR_BALANCE_FEEDFORWARD_LIMIT_N
     feedforward_exponent: float = 1.0
     position_command_name: str | None = None
+    activation_command_name: str | None = None
 
     def build(self, env: ManagerBasedRlEnv) -> LinearMitAction:
         return LinearMitAction(self, env)
@@ -233,7 +248,9 @@ def build_height_action_terms(play: bool = False) -> dict[str, ActionTermCfg]:
     return terms
 
 
-def build_jump_stage_one_action_terms() -> dict[str, ActionTermCfg]:
+def build_jump_stage_one_action_terms(
+    gate_with_jump_command: bool = False,
+) -> dict[str, ActionTermCfg]:
     terms = build_action_terms()
     terms["linear_impedance"] = LinearMitActionCfg(
         entity_name=ROBOT_ENTITY_NAME,
@@ -246,5 +263,8 @@ def build_jump_stage_one_action_terms() -> dict[str, ActionTermCfg]:
         feedforward_force_scale_n=LINEAR_MAX_FORCE_N,
         feedforward_exponent=3.0,
         position_command_name=HEIGHT_COMMAND_NAME,
+        activation_command_name=(
+            JUMP_COMMAND_NAME if gate_with_jump_command else None
+        ),
     )
     return terms
