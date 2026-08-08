@@ -4,7 +4,6 @@ from mjlab_tasks.jumping_robot_balance.mdp.actions import (
     build_action_terms,
     build_height_action_terms,
     build_jump_stage_one_action_terms,
-    build_jump_stage_two_action_terms,
 )
 from mjlab_tasks.jumping_robot_balance.mdp.commands import build_height_commands
 from mjlab_tasks.jumping_robot_balance.mdp.jump_commands import build_jump_commands
@@ -28,7 +27,6 @@ __all__ = [
     "build_height_commands",
     "build_height_robustness_events",
     "build_jump_stage_one_action_terms",
-    "build_jump_stage_two_action_terms",
     "build_jump_commands",
     "build_jump_stage_two_events",
     "build_observation_groups",

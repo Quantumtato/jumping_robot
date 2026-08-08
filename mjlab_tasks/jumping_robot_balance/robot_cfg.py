@@ -39,8 +39,16 @@ SIM_TIMESTEP_S = 0.0005
 SIM_DECIMATION = 2
 
 EPISODE_LENGTH_S = 20.0
-# At the nominal linear position, this leaves the foot about 7 mm above the floor.
-DEFAULT_BASE_HEIGHT_M = -0.05
+# The foot collision capsule's lower endpoint is 17.5 mm above the base at
+# zero linear position. Its 28 mm radius makes the capsule's lowest point
+# 10.5 mm below the base before accounting for the linear joint.
+FOOT_COLLISION_CAPSULE_RADIUS_M = 0.028
+FOOT_COLLISION_LOW_ENDPOINT_AT_ZERO_M = 0.0175
+DEFAULT_BASE_HEIGHT_M = (
+    FOOT_COLLISION_CAPSULE_RADIUS_M
+    - FOOT_COLLISION_LOW_ENDPOINT_AT_ZERO_M
+    + LINEAR_RANGE_CENTER_M
+)
 
 
 def get_robot_spec() -> mujoco.MjSpec:

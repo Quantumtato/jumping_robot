@@ -14,12 +14,6 @@ from mjlab_tasks.jumping_robot_balance.mdp.commands import HEIGHT_COMMAND_NAME
 from mjlab_tasks.jumping_robot_balance.mdp.height_curriculum import (
     scheduled_height_half_width,
 )
-from mjlab_tasks.jumping_robot_balance.mdp.jump_commands import (
-    JUMP_COMMAND_NAME,
-    PHASE_BALANCE,
-    PHASE_PRELOAD,
-    PHASE_THRUST,
-)
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FLYWHEEL_X_JOINT,
     FLYWHEEL_Y_JOINT,
@@ -28,7 +22,6 @@ from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     LINEAR_MAX_FORCE_N,
     LINEAR_POSITION_KD_N_S_M,
     LINEAR_POSITION_KP_N_M,
-    LINEAR_RANGE_CENTER_M,
     LINEAR_RANGE_HALF_WIDTH_M,
     LINEAR_RANGE_MAX_M,
     LINEAR_RANGE_MIN_M,
@@ -43,13 +36,8 @@ _NOMINAL_BALANCE_LINEAR_SCALE_M = 0.0
 _HEIGHT_POSITION_RESIDUAL_SCALE_M = 0.010
 _HEIGHT_TARGET_MAX_SPEED_M_S = 1.0
 _JUMP_POSITION_RESIDUAL_SCALE_M = LINEAR_RANGE_HALF_WIDTH_M
-_JUMP_TARGET_MAX_SPEED_M_S = 3.0
-_JUMP_VELOCITY_TARGET_SCALE_M_S = 3.0
-_JUMP_FORCE_LIMIT_SCHEDULE_N = (
-    (0, 30.0),
-    (64_000, 60.0),
-    (128_000, LINEAR_MAX_FORCE_N),
-)
+_JUMP_TARGET_MAX_SPEED_M_S = 10.0
+_JUMP_VELOCITY_TARGET_SCALE_M_S = 10.0
 
 
 class LinearMitAction(ActionTerm):
@@ -105,30 +93,6 @@ class LinearMitAction(ActionTerm):
 
     def process_actions(self, actions: torch.Tensor) -> None:
         self._raw_actions[:] = actions
-        processed_actions = actions
-        if self.cfg.guided_jump_actions:
-            if self.cfg.jump_command_name is None:
-                raise ValueError(
-                    "Guided jump actions require a jump command term."
-                )
-            jump_term = self._env.command_manager.get_term(
-                self.cfg.jump_command_name
-            )
-            processed_actions = actions.clone()
-            preload = jump_term.phase == PHASE_PRELOAD
-            thrust = jump_term.phase == PHASE_THRUST
-            processed_actions[preload, 0] = (
-                -0.75 + 0.25 * actions[preload, 0]
-            )
-            processed_actions[preload, 1:] = (
-                -0.5 + 0.5 * actions[preload, 1:]
-            )
-            processed_actions[thrust, 0] = (
-                0.75 + 0.25 * actions[thrust, 0]
-            )
-            processed_actions[thrust, 1:] = (
-                0.5 + 0.5 * actions[thrust, 1:]
-            )
         half_width = scheduled_height_half_width(
             self._env.common_step_counter,
             self.cfg.position_scale_schedule,
@@ -141,17 +105,8 @@ class LinearMitAction(ActionTerm):
             position_center = self._env.command_manager.get_command(
                 self.cfg.position_command_name
             )
-        if self.cfg.jump_command_name is not None:
-            jump_active = self._env.command_manager.get_command(
-                self.cfg.jump_command_name
-            )[:, :1] > 0.5
-            position_center = torch.where(
-                jump_active,
-                torch.full_like(position_center, LINEAR_RANGE_CENTER_M),
-                position_center,
-            )
         desired_position = torch.clamp(
-            position_center + processed_actions[:, :1] * half_width,
+            position_center + actions[:, :1] * half_width,
             min=LINEAR_RANGE_MIN_M,
             max=LINEAR_RANGE_MAX_M,
         )
@@ -164,7 +119,7 @@ class LinearMitAction(ActionTerm):
         action_index = 1
         if self.cfg.expose_velocity_target:
             normalized_velocity = torch.clamp(
-                processed_actions[:, action_index : action_index + 1],
+                actions[:, action_index : action_index + 1],
                 min=-1.0,
                 max=1.0,
             )
@@ -180,7 +135,7 @@ class LinearMitAction(ActionTerm):
             self._velocity_target.zero_()
         if self.cfg.expose_feedforward:
             normalized_force = torch.clamp(
-                processed_actions[:, action_index : action_index + 1],
+                actions[:, action_index : action_index + 1],
                 min=-1.0,
                 max=1.0,
             )
@@ -202,22 +157,11 @@ class LinearMitAction(ActionTerm):
             + self.cfg.kd_n_s_m * (self._velocity_target - velocity)
             + self._feedforward_force
         )
-        force_limit = torch.full_like(effort, self.cfg.max_force_n)
-        if self.cfg.guided_jump_actions:
-            guided_force_limit = scheduled_height_half_width(
-                self._env.common_step_counter,
-                self.cfg.guided_force_limit_schedule_n,
-            )
-            if self.cfg.jump_command_name is None:
-                raise ValueError(
-                    "Guided jump actions require a jump command term."
-                )
-            jump_term = self._env.command_manager.get_term(
-                self.cfg.jump_command_name
-            )
-            jump_active = jump_term.phase != PHASE_BALANCE
-            force_limit[jump_active] = guided_force_limit
-        effort = torch.clamp(effort, min=-force_limit, max=force_limit)
+        effort = torch.clamp(
+            effort,
+            min=-self.cfg.max_force_n,
+            max=self.cfg.max_force_n,
+        )
         self._entity.set_joint_effort_target(
             effort,
             joint_ids=self._target_ids,
@@ -250,11 +194,6 @@ class LinearMitActionCfg(ActionTermCfg):
     feedforward_force_scale_n: float = LINEAR_BALANCE_FEEDFORWARD_LIMIT_N
     feedforward_exponent: float = 1.0
     position_command_name: str | None = None
-    jump_command_name: str | None = None
-    guided_jump_actions: bool = False
-    guided_force_limit_schedule_n: tuple[tuple[int, float], ...] = (
-        (0, LINEAR_MAX_FORCE_N),
-    )
 
     def build(self, env: ManagerBasedRlEnv) -> LinearMitAction:
         return LinearMitAction(self, env)
@@ -308,17 +247,4 @@ def build_jump_stage_one_action_terms() -> dict[str, ActionTermCfg]:
         feedforward_exponent=3.0,
         position_command_name=HEIGHT_COMMAND_NAME,
     )
-    return terms
-
-
-def build_jump_stage_two_action_terms() -> dict[str, ActionTermCfg]:
-    terms = build_jump_stage_one_action_terms()
-    linear_cfg = terms["linear_impedance"]
-    if not isinstance(linear_cfg, LinearMitActionCfg):
-        raise TypeError(
-            f"Expected LinearMitActionCfg, received {type(linear_cfg).__name__}."
-        )
-    linear_cfg.jump_command_name = JUMP_COMMAND_NAME
-    linear_cfg.guided_jump_actions = True
-    linear_cfg.guided_force_limit_schedule_n = _JUMP_FORCE_LIMIT_SCHEDULE_N
     return terms

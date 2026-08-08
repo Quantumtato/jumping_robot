@@ -5,12 +5,16 @@
   <compiler angle="radian" meshdir="assets" autolimits="true"/>
   <default>
     <default class="jumping_robot">
-      <joint frictionloss="0.1" armature="0.005"/>
+      <joint frictionloss="0.1" armature="0.005"
+             solreflimit="0.001 1"
+             solimplimit="0.99 0.999 0.0005 0.5 2"/>
       <default class="visual">
         <geom type="mesh" contype="0" conaffinity="0" group="2"/>
       </default>
       <default class="collision">
-        <geom contype="1" conaffinity="1" group="3"/>
+        <geom contype="1" conaffinity="1" group="3" priority="1"
+              solref="0.001 1"
+              solimp="0.99 0.999 0.0005 0.5 2"/>
       </default>
     </default>
   </default>
@@ -77,5 +81,9 @@
     <motor name="linear" joint="linear" ctrllimited="true" ctrlrange="-120 120"
            forcelimited="true" forcerange="-120 120"/>
   </actuator>
+  <contact>
+    <exclude body1="flywheel" body2="foot"/>
+    <exclude body1="flywheel_2" body2="foot"/>
+  </contact>
   <equality/>
 </mujoco>

@@ -6,11 +6,6 @@ import torch
 
 from mjlab.rl.runner import MjlabOnPolicyRunner
 
-from mjlab_tasks.jumping_robot_balance.mdp.jump_commands import (
-    JUMP_COMMAND_NAME,
-    JumpCommand,
-)
-
 
 class JumpStageTwoRunner(MjlabOnPolicyRunner):
     """Warm-start Stage 2 while zero-initializing its new command inputs."""
@@ -23,28 +18,37 @@ class JumpStageTwoRunner(MjlabOnPolicyRunner):
         map_location: str | None = None,
     ) -> dict:
         loaded = torch.load(path, map_location=map_location, weights_only=False)
-        source_dim = loaded["actor_state_dict"]["mlp.0.weight"].shape[1]
-        target_dim = self.alg._raw_actor.state_dict()["mlp.0.weight"].shape[1]
-        if source_dim == target_dim:
-            infos = super().load(path, load_cfg, strict, map_location)
-            self._restore_curriculum(infos)
-            return infos
-        if source_dim > target_dim:
+        source_actor_dim = loaded["actor_state_dict"]["mlp.0.weight"].shape[1]
+        target_actor_dim = self.alg._raw_actor.state_dict()["mlp.0.weight"].shape[1]
+        source_critic_dim = loaded["critic_state_dict"]["mlp.0.weight"].shape[1]
+        target_critic_dim = self.alg._raw_critic.state_dict()["mlp.0.weight"].shape[1]
+        if (
+            source_actor_dim == target_actor_dim
+            and source_critic_dim == target_critic_dim
+        ):
+            return super().load(path, load_cfg, strict, map_location)
+        if source_actor_dim > target_actor_dim:
             raise ValueError(
-                f"Checkpoint has {source_dim} observations, but the Stage 2 "
-                f"policy has only {target_dim}."
+                f"Checkpoint actor has {source_actor_dim} observations, but "
+                f"the Stage 2 actor has only {target_actor_dim}."
             )
-
-        self._expand_model_inputs(
-            loaded["actor_state_dict"],
-            self.alg._raw_actor.state_dict(),
-        )
-        self._expand_model_inputs(
-            loaded["critic_state_dict"],
-            self.alg._raw_critic.state_dict(),
-        )
-        action_std = loaded["actor_state_dict"]["distribution.std_param"]
-        action_std[-3:] = torch.clamp(action_std[-3:], min=0.5)
+        if source_critic_dim > target_critic_dim:
+            raise ValueError(
+                f"Checkpoint critic has {source_critic_dim} observations, but "
+                f"the Stage 2 critic has only {target_critic_dim}."
+            )
+        if source_actor_dim < target_actor_dim:
+            self._expand_model_inputs(
+                loaded["actor_state_dict"],
+                self.alg._raw_actor.state_dict(),
+            )
+            action_std = loaded["actor_state_dict"]["distribution.std_param"]
+            action_std[-3:] = torch.clamp(action_std[-3:], min=0.5)
+        if source_critic_dim < target_critic_dim:
+            self._expand_model_inputs(
+                loaded["critic_state_dict"],
+                self.alg._raw_critic.state_dict(),
+            )
         warm_start_cfg = {
             "actor": True,
             "critic": True,
@@ -54,30 +58,11 @@ class JumpStageTwoRunner(MjlabOnPolicyRunner):
         }
         self.alg.load(loaded, warm_start_cfg, strict=True)
         print(
-            f"[INFO]: Warm-started {source_dim} of {target_dim} observation "
-            "inputs; new command weights are zero-initialized and linear-action "
-            "exploration is at least 0.5."
+            f"[INFO]: Warm-started actor observations {source_actor_dim}/"
+            f"{target_actor_dim} and critic observations {source_critic_dim}/"
+            f"{target_critic_dim}; new observation weights are zero-initialized."
         )
         return loaded.get("infos") or {}
-
-    def save(self, path: str, infos=None) -> None:
-        term = self.env.unwrapped.command_manager.get_term(JUMP_COMMAND_NAME)
-        if not isinstance(term, JumpCommand):
-            raise TypeError(f"Expected JumpCommand, received {type(term).__name__}.")
-        infos = {
-            **(infos or {}),
-            "jump_curriculum": term.curriculum_state(),
-        }
-        super().save(path, infos)
-
-    def _restore_curriculum(self, infos: dict) -> None:
-        state = infos.get("jump_curriculum")
-        if state is None:
-            return
-        term = self.env.unwrapped.command_manager.get_term(JUMP_COMMAND_NAME)
-        if not isinstance(term, JumpCommand):
-            raise TypeError(f"Expected JumpCommand, received {type(term).__name__}.")
-        term.load_curriculum_state(state)
 
     @staticmethod
     def _expand_model_inputs(

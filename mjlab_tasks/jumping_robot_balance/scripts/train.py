@@ -66,6 +66,7 @@ def main() -> None:
     cfg.agent.seed = args.seed
     cfg.env.seed = args.seed
     cfg = replace(cfg, log_root=args.log_root)
+    cfg.agent.wandb_tags = (*cfg.agent.wandb_tags, args.stage)
 
     if args.stage == "robust":
         from mjlab_tasks.jumping_robot_balance.mdp import build_robustness_events

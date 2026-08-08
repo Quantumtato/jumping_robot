@@ -16,7 +16,6 @@ from mjlab_tasks.jumping_robot_balance.mdp import (
     build_height_action_terms,
     build_height_commands,
     build_jump_stage_one_action_terms,
-    build_jump_stage_two_action_terms,
     build_jump_commands,
     build_observation_groups,
     build_randomization_events,
@@ -59,16 +58,12 @@ def jumping_robot_balance_env_cfg(
             jump_stage_two=jump_stage_two,
         ),
         actions=(
-            build_jump_stage_two_action_terms()
-            if jump_stage_two
+            build_jump_stage_one_action_terms()
+            if jump_stage_one
             else (
-                build_jump_stage_one_action_terms()
-                if jump_stage_one
-                else (
-                    build_height_action_terms(play=play)
-                    if height_control
-                    else build_action_terms()
-                )
+                build_height_action_terms(play=play)
+                if height_control
+                else build_action_terms()
             )
         ),
         events=build_randomization_events(),
@@ -77,7 +72,7 @@ def jumping_robot_balance_env_cfg(
             jump_stage_one=jump_stage_one,
             jump_stage_two=jump_stage_two,
         ),
-        terminations=build_termination_terms(jump_stage_two=jump_stage_two),
+        terminations=build_termination_terms(),
         viewer=ViewerConfig(
             origin_type=ViewerConfig.OriginType.ASSET_BODY,
             entity_name=ROBOT_ENTITY_NAME,

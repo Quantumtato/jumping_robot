@@ -53,7 +53,13 @@ def foot_ground_contact(env: "ManagerBasedRlEnv") -> torch.Tensor:
     terrain_geom_id, foot_body_id = _contact_ids(env)
     contacts = env.sim.data.contact
     geom = contacts.geom.to(dtype=torch.long)
-    valid = contacts.dim > 0
+    contact_ids = torch.arange(geom.shape[0], device=env.device)
+    valid = (
+        (contact_ids < env.sim.data.nacon[0])
+        & (contacts.dim > 0)
+        & (contacts.dist < contacts.includemargin)
+    )
+    world_ids = contacts.worldid.to(dtype=torch.long)
     geom_body_ids = env.sim.model.geom_bodyid
     foot_first = geom_body_ids[geom[:, 0]] == foot_body_id
     foot_second = geom_body_ids[geom[:, 1]] == foot_body_id
@@ -67,6 +73,6 @@ def foot_ground_contact(env: "ManagerBasedRlEnv") -> torch.Tensor:
         dtype=torch.float32,
         device=env.device,
     )
-    world_ids = contacts.worldid[ground_contact].to(dtype=torch.long)
-    result[world_ids, 0] = 1.0
+    contacting_world_ids = world_ids[ground_contact]
+    result[contacting_world_ids, 0] = 1.0
     return result
