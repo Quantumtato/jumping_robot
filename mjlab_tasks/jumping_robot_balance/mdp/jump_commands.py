@@ -248,6 +248,8 @@ class JumpCommand(CommandTerm):
             min=0.0,
         )
         self.has_landed[touchdown] = True
+        # Return control to the standing-height objective as soon as flight ends.
+        self._finish_jump(touchdown.nonzero().flatten())
 
         recovering = self.has_landed & ~self.landing_recovery_complete
         horizontal_gravity = torch.linalg.vector_norm(
