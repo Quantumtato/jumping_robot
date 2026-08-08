@@ -19,7 +19,13 @@ def main() -> None:
 
     from mjlab.scripts.play import PlayConfig, run_play
 
-    from mjlab_tasks.jumping_robot_balance.task_registry import TASK_ID, register_tasks
+    from mjlab_tasks.jumping_robot_balance.task_registry import (
+        HEIGHT_TASK_ID,
+        JUMP_STAGE_ONE_TASK_ID,
+        JUMP_STAGE_TWO_TASK_ID,
+        TASK_ID,
+        register_tasks,
+    )
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent", choices=("zero", "random", "trained"), default="zero")
@@ -29,6 +35,22 @@ def main() -> None:
     parser.add_argument("--device", default=None)
     parser.add_argument("--viewer", choices=("auto", "native", "viser"), default="auto")
     parser.add_argument("--no-terminations", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--height-control",
+        action="store_true",
+        help="Enable the trained linear-position action for height-stage checkpoints.",
+    )
+    mode.add_argument(
+        "--jump-stage-1",
+        action="store_true",
+        help="Use the five-action jump Stage 1 task.",
+    )
+    mode.add_argument(
+        "--jump-stage-2",
+        action="store_true",
+        help="Use the vertical-hop Stage 2 task and one-shot jump command.",
+    )
     args = parser.parse_args()
 
     register_tasks()
@@ -42,7 +64,15 @@ def main() -> None:
         viewer=args.viewer,
         no_terminations=args.no_terminations,
     )
-    run_play(TASK_ID, cfg)
+    if args.jump_stage_2:
+        task_id = JUMP_STAGE_TWO_TASK_ID
+    elif args.jump_stage_1:
+        task_id = JUMP_STAGE_ONE_TASK_ID
+    elif args.height_control:
+        task_id = HEIGHT_TASK_ID
+    else:
+        task_id = TASK_ID
+    run_play(task_id, cfg)
 
 
 if __name__ == "__main__":

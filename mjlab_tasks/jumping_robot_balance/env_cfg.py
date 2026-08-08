@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import mujoco
+
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
@@ -10,6 +12,11 @@ from mjlab.viewer import ViewerConfig
 
 from mjlab_tasks.jumping_robot_balance.mdp import (
     build_action_terms,
+    build_disturbance_commands,
+    build_height_action_terms,
+    build_height_commands,
+    build_jump_stage_one_action_terms,
+    build_jump_commands,
     build_observation_groups,
     build_randomization_events,
     build_reward_terms,
@@ -25,18 +32,46 @@ from mjlab_tasks.jumping_robot_balance.robot_cfg import (
 )
 
 
-def jumping_robot_balance_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def _configure_scene_spec(spec: mujoco.MjSpec) -> None:
+    spec.njmax = 128
+
+
+def jumping_robot_balance_env_cfg(
+    play: bool = False,
+    height_control: bool = False,
+    jump_stage_one: bool = False,
+    jump_stage_two: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    jump_stage_one = jump_stage_one or jump_stage_two
+    height_control = height_control or jump_stage_one
     cfg = ManagerBasedRlEnvCfg(
         scene=SceneCfg(
             terrain=TerrainEntityCfg(terrain_type="plane"),
             entities={ROBOT_ENTITY_NAME: make_robot_entity_cfg()},
             num_envs=1,
             env_spacing=2.5,
+            spec_fn=_configure_scene_spec,
         ),
-        observations=build_observation_groups(),
-        actions=build_action_terms(),
+        observations=build_observation_groups(
+            height_control=height_control,
+            jump_stage_one=jump_stage_one,
+            jump_stage_two=jump_stage_two,
+        ),
+        actions=(
+            build_jump_stage_one_action_terms()
+            if jump_stage_one
+            else (
+                build_height_action_terms(play=play)
+                if height_control
+                else build_action_terms()
+            )
+        ),
         events=build_randomization_events(),
-        rewards=build_reward_terms(),
+        rewards=build_reward_terms(
+            height_control=height_control,
+            jump_stage_one=jump_stage_one,
+            jump_stage_two=jump_stage_two,
+        ),
         terminations=build_termination_terms(),
         viewer=ViewerConfig(
             origin_type=ViewerConfig.OriginType.ASSET_BODY,
@@ -57,8 +92,13 @@ def jumping_robot_balance_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         episode_length_s=EPISODE_LENGTH_S,
     )
 
+    commands = build_height_commands(play=play) if height_control else {}
+    if jump_stage_two:
+        commands.update(build_jump_commands(play=play))
     if play:
         cfg.episode_length_s = 1e10
         cfg.observations["actor"].enable_corruption = False
+        commands.update(build_disturbance_commands())
+    cfg.commands = commands
 
     return cfg

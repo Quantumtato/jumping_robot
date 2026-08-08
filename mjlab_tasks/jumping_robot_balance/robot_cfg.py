@@ -23,6 +23,10 @@ MAX_FLYWHEEL_SPEED_RAD_S = 1500.0
 LINEAR_MAX_FORCE_N = 120.0
 LINEAR_MAX_SPEED_M_S = 60.0
 LINEAR_MAX_STROKE_M = 0.152
+# Approximately 5 Hz and critically damped for the 1.6 kg physical robot.
+LINEAR_POSITION_KP_N_M = 1600.0
+LINEAR_POSITION_KD_N_S_M = 100.0
+LINEAR_BALANCE_FEEDFORWARD_LIMIT_N = 30.0
 FALL_ANGLE_DEG = 30.0
 
 LINEAR_RANGE_MIN_M = -0.1458580691518949
@@ -35,7 +39,16 @@ SIM_TIMESTEP_S = 0.0005
 SIM_DECIMATION = 2
 
 EPISODE_LENGTH_S = 20.0
-DEFAULT_BASE_HEIGHT_M = 0.45
+# The foot collision capsule's lower endpoint is 17.5 mm above the base at
+# zero linear position. Its 28 mm radius makes the capsule's lowest point
+# 10.5 mm below the base before accounting for the linear joint.
+FOOT_COLLISION_CAPSULE_RADIUS_M = 0.028
+FOOT_COLLISION_LOW_ENDPOINT_AT_ZERO_M = 0.0175
+DEFAULT_BASE_HEIGHT_M = (
+    FOOT_COLLISION_CAPSULE_RADIUS_M
+    - FOOT_COLLISION_LOW_ENDPOINT_AT_ZERO_M
+    + LINEAR_RANGE_CENTER_M
+)
 
 
 def get_robot_spec() -> mujoco.MjSpec:
@@ -44,9 +57,14 @@ def get_robot_spec() -> mujoco.MjSpec:
 
 ROBOT_ARTICULATION = EntityArticulationInfoCfg(
     actuators=(
-        XmlActuatorCfg(target_names_expr=(FLYWHEEL_X_JOINT,)),
-        XmlActuatorCfg(target_names_expr=(FLYWHEEL_Y_JOINT,)),
-        XmlActuatorCfg(target_names_expr=(LINEAR_JOINT,)),
+        XmlActuatorCfg(
+            target_names_expr=(FLYWHEEL_X_JOINT, FLYWHEEL_Y_JOINT),
+            command_field="effort",
+        ),
+        XmlActuatorCfg(
+            target_names_expr=(LINEAR_JOINT,),
+            command_field="effort",
+        ),
     ),
 )
 

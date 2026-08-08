@@ -11,6 +11,12 @@ from mjlab.envs import mdp as envs_mdp
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
+from mjlab_tasks.jumping_robot_balance.mdp.commands import HEIGHT_COMMAND_NAME
+from mjlab_tasks.jumping_robot_balance.mdp.contact import foot_ground_contact
+from mjlab_tasks.jumping_robot_balance.mdp.jump_commands import (
+    JUMP_COMMAND_NAME,
+    JumpCommand,
+)
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FLYWHEEL_X_JOINT,
     FLYWHEEL_Y_JOINT,
@@ -29,6 +35,7 @@ _ROBOT_CFG = SceneEntityCfg(ROBOT_ENTITY_NAME)
 _FLYWHEEL_CFG = SceneEntityCfg(
     ROBOT_ENTITY_NAME,
     joint_names=(FLYWHEEL_X_JOINT, FLYWHEEL_Y_JOINT),
+    preserve_order=True,
 )
 _LINEAR_CFG = SceneEntityCfg(ROBOT_ENTITY_NAME, joint_names=(LINEAR_JOINT,))
 
@@ -51,7 +58,70 @@ def _normalized_linear_position(
     return 2.0 * (q - LINEAR_RANGE_MIN_M) / (LINEAR_RANGE_MAX_M - LINEAR_RANGE_MIN_M) - 1.0
 
 
-def build_observation_groups() -> dict[str, ObservationGroupCfg]:
+def _normalized_height_command(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    command = env.command_manager.get_command(HEIGHT_COMMAND_NAME)
+    return (
+        2.0
+        * (command - LINEAR_RANGE_MIN_M)
+        / (LINEAR_RANGE_MAX_M - LINEAR_RANGE_MIN_M)
+        - 1.0
+    )
+
+
+def _normalized_linear_position_target(
+    env: "ManagerBasedRlEnv",
+) -> torch.Tensor:
+    target = env.action_manager.get_term("linear_impedance").position_target
+    return (
+        2.0
+        * (target - LINEAR_RANGE_MIN_M)
+        / (LINEAR_RANGE_MAX_M - LINEAR_RANGE_MIN_M)
+        - 1.0
+    )
+
+
+def _normalized_linear_velocity_target(
+    env: "ManagerBasedRlEnv",
+) -> torch.Tensor:
+    term = env.action_manager.get_term("linear_impedance")
+    return term.velocity_target / term.cfg.velocity_target_scale_m_s
+
+
+def _privileged_root_height(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    asset: Entity = env.scene[ROBOT_ENTITY_NAME]
+    return (
+        asset.data.root_link_pos_w[:, 2:3]
+        - env.scene.env_origins[:, 2:3]
+    )
+
+
+def _privileged_root_linear_velocity(
+    env: "ManagerBasedRlEnv",
+) -> torch.Tensor:
+    asset: Entity = env.scene[ROBOT_ENTITY_NAME]
+    return asset.data.root_link_lin_vel_w
+
+
+def _privileged_jump_state(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    term = env.command_manager.get_term(JUMP_COMMAND_NAME)
+    if not isinstance(term, JumpCommand):
+        raise TypeError(f"Expected JumpCommand, received {type(term).__name__}.")
+    return torch.stack(
+        (
+            term.has_triggered.float(),
+            term.was_airborne.float(),
+            term.has_landed.float(),
+            term.landing_impact_speed,
+        ),
+        dim=1,
+    )
+
+
+def build_observation_groups(
+    height_control: bool = False,
+    jump_stage_one: bool = False,
+    jump_stage_two: bool = False,
+) -> dict[str, ObservationGroupCfg]:
     actor_terms = {
         "projected_gravity": ObservationTermCfg(
             func=envs_mdp.projected_gravity,
@@ -75,6 +145,37 @@ def build_observation_groups() -> dict[str, ObservationGroupCfg]:
         ),
         "last_action": ObservationTermCfg(func=envs_mdp.last_action),
     }
+    if height_control:
+        actor_terms["height_command"] = ObservationTermCfg(
+            func=_normalized_height_command,
+        )
+        actor_terms["linear_position_target"] = ObservationTermCfg(
+            func=_normalized_linear_position_target,
+        )
+    if jump_stage_one or jump_stage_two:
+        actor_terms["linear_velocity_target"] = ObservationTermCfg(
+            func=_normalized_linear_velocity_target,
+        )
+        actor_terms["foot_contact"] = ObservationTermCfg(
+            func=foot_ground_contact,
+        )
+    if jump_stage_two:
+        actor_terms["jump_command"] = ObservationTermCfg(
+            func=envs_mdp.generated_commands,
+            params={"command_name": JUMP_COMMAND_NAME},
+        )
+
+    critic_terms = {**actor_terms}
+    if jump_stage_two:
+        critic_terms["privileged_root_height"] = ObservationTermCfg(
+            func=_privileged_root_height,
+        )
+        critic_terms["privileged_root_linear_velocity"] = ObservationTermCfg(
+            func=_privileged_root_linear_velocity,
+        )
+        critic_terms["privileged_jump_state"] = ObservationTermCfg(
+            func=_privileged_jump_state,
+        )
 
     return {
         "actor": ObservationGroupCfg(
@@ -83,7 +184,7 @@ def build_observation_groups() -> dict[str, ObservationGroupCfg]:
             enable_corruption=True,
         ),
         "critic": ObservationGroupCfg(
-            terms={**actor_terms},
+            terms=critic_terms,
             concatenate_terms=True,
             enable_corruption=False,
         ),

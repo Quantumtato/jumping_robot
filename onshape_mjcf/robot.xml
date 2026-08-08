@@ -1,0 +1,89 @@
+<?xml version="1.0" ?>
+<!-- Generated using onshape-to-robot -->
+<!-- Onshape https://cad.onshape.com/documents/e7f4e3f1d5df0bd60aa67d40/v/1ecf28597f97b16e7b395646/e/9d97697dc82544309c152f6d -->
+<mujoco model="jumping_robot">
+  <compiler angle="radian" meshdir="assets" autolimits="true"/>
+  <default>
+    <default class="jumping_robot">
+      <joint frictionloss="0.1" armature="0.005"
+             solreflimit="0.001 1"
+             solimplimit="0.99 0.999 0.0005 0.5 2"/>
+      <default class="visual">
+        <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+      </default>
+      <default class="collision">
+        <geom contype="1" conaffinity="1" group="3" priority="1"
+              solref="0.001 1"
+              solimp="0.99 0.999 0.0005 0.5 2"/>
+      </default>
+    </default>
+  </default>
+  <worldbody>
+    <!-- Link baserotor -->
+    <body name="baserotor" pos="0 0 0" quat="1 0 0 0" childclass="jumping_robot">
+      <freejoint name="baserotor_freejoint"/>
+      <inertial pos="-0.00523266 -0.00550971 0.223583" mass="0.899186" fullinertia="0.00115686 0.00115457 0.00140657 -0.00033253 -0.000164131 -0.000161397"/>
+      <geom class="collision" type="sphere" pos="0 0 0.234258" size="0.07" rgba="1 0 0 0.2"/>
+      <!-- Part baserotor_parts -->
+      <geom type="mesh" class="visual" pos="-0.00523266 -0.00550971 0.223583" quat="1 0 0 0" mesh="baserotor_collision" material="baserotor_visual_material"/>
+      <geom type="mesh" class="collision" pos="-0.00523266 -0.00550971 0.223583" quat="1 0 0 0" mesh="baserotor_collision" material="baserotor_collision_material"/>
+      <!-- Link flywheel -->
+      <body name="flywheel" pos="-0 0.0376 0.234258" quat="0.0747795 -0.0747795 0.703142 0.703142">
+        <!-- Joint from baserotor to flywheel -->
+        <joint axis="0 0 1" name="flywheelY" type="hinge"
+               armature="0" frictionloss="0.001301448683080238"
+               damping="1.8675233508378078e-06"/>
+        <inertial pos="-1e-12 0 0.0171871" mass="0.0948878" fullinertia="4.14884e-05 4.14884e-05 7.76954e-05 -0 -0 0"/>
+        <!-- Part flywheel_parts -->
+        <geom type="mesh" class="visual" pos="-1e-12 0 0.0171871" quat="0.0747795 0.0747795 -0.703142 -0.703142" mesh="flywheel_collision" material="flywheel_visual_material"/>
+        <geom type="mesh" class="collision" pos="-1e-12 0 0.0171871" quat="0.0747795 0.0747795 -0.703142 -0.703142" mesh="flywheel_collision" material="flywheel_collision_material"/>
+      </body>
+      <!-- Link flywheel_2 -->
+      <body name="flywheel_2" pos="0.0376 0 0.234258" quat="0.67797 0.200888 0.67797 0.200888">
+        <!-- Joint from baserotor to flywheel_2 -->
+        <joint axis="0 0 1" name="flywheelX" type="hinge"
+               armature="0" frictionloss="0.001301448683080238"
+               damping="1.8675233508378078e-06"/>
+        <inertial pos="-1e-12 0 0.0171871" mass="0.0948878" fullinertia="4.14884e-05 4.14884e-05 7.76954e-05 0 -0 0"/>
+        <!-- Part flywheel_2_parts -->
+        <geom type="mesh" class="visual" pos="-1e-12 0 0.0171871" quat="0.67797 -0.200888 -0.67797 -0.200888" mesh="flywheel_2_collision" material="flywheel_2_visual_material"/>
+        <geom type="mesh" class="collision" pos="-1e-12 0 0.0171871" quat="0.67797 -0.200888 -0.67797 -0.200888" mesh="flywheel_2_collision" material="flywheel_2_collision_material"/>
+      </body>
+      <!-- Link foot -->
+      <body name="foot" pos="-0 0 0.277858" quat="0 -0.707107 0.707107 0">
+        <!-- Joint from baserotor to foot -->
+        <joint axis="0 0 1" name="linear" type="slide" range="-0.1458580691518949 0.010141930848105107"/>
+        <inertial pos="0.00255765 0.00254489 0.126795" mass="0.236077" fullinertia="0.00278293 0.00278293 6.80011e-05 5.34476e-06 4.05765e-06 4.00316e-06"/>
+        <geom class="collision" type="capsule" fromto="0 0 -0.045642 0 0 0.260358" size="0.028" rgba="1 0 0 0.2"/>
+        <!-- Part foot_parts -->
+        <geom type="mesh" class="visual" pos="0.00255765 0.00254489 0.126795" quat="0 0.707107 -0.707107 -0" mesh="foot_collision" material="foot_visual_material"/>
+        <geom type="mesh" class="collision" pos="0.00255765 0.00254489 0.126795" quat="0 0.707107 -0.707107 -0" mesh="foot_collision" material="foot_collision_material"/>
+      </body>
+    </body>
+  </worldbody>
+  <asset>
+    <mesh file="merged/baserotor_collision.stl"/>
+    <mesh file="merged/flywheel_collision.stl"/>
+    <mesh file="merged/foot_collision.stl"/>
+    <mesh file="merged/flywheel_2_collision.stl"/>
+    <material name="baserotor_visual_material" rgba="0.766543 0.692618 0.502746 1"/>
+    <material name="baserotor_collision_material" rgba="0.766543 0.692618 0.502746 1"/>
+    <material name="flywheel_visual_material" rgba="0.749539 0.699028 0.638906 1"/>
+    <material name="flywheel_collision_material" rgba="0.749539 0.699028 0.638906 1"/>
+    <material name="flywheel_2_visual_material" rgba="0.749539 0.699028 0.638906 1"/>
+    <material name="flywheel_2_collision_material" rgba="0.749539 0.699028 0.638906 1"/>
+    <material name="foot_visual_material" rgba="0.552982 0.617831 0.721554 1"/>
+    <material name="foot_collision_material" rgba="0.552982 0.617831 0.721554 1"/>
+  </asset>
+  <actuator>
+    <motor name="flywheelX" joint="flywheelX" ctrllimited="true" ctrlrange="-0.33 0.33"/>
+    <motor name="flywheelY" joint="flywheelY" ctrllimited="true" ctrlrange="-0.33 0.33"/>
+    <motor name="linear" joint="linear" ctrllimited="true" ctrlrange="-120 120"
+           forcelimited="true" forcerange="-120 120"/>
+  </actuator>
+  <contact>
+    <exclude body1="flywheel" body2="foot"/>
+    <exclude body1="flywheel_2" body2="foot"/>
+  </contact>
+  <equality/>
+</mujoco>
