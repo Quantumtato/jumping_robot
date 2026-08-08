@@ -117,6 +117,25 @@ def _privileged_jump_state(env: "ManagerBasedRlEnv") -> torch.Tensor:
     )
 
 
+def _flight_phase_history_state(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Compact proprioceptive state whose history identifies jump phase."""
+    return torch.cat(
+        (
+            _normalized_linear_position(env),
+            _normalized_joint_vel(
+                env,
+                LINEAR_MAX_SPEED_M_S,
+                _LINEAR_CFG,
+            ),
+            _normalized_linear_velocity_target(env),
+            envs_mdp.last_action(env),
+            foot_ground_contact(env),
+            env.command_manager.get_command(JUMP_COMMAND_NAME),
+        ),
+        dim=1,
+    )
+
+
 def build_observation_groups(
     height_control: bool = False,
     jump_stage_one: bool = False,
@@ -163,6 +182,10 @@ def build_observation_groups(
         actor_terms["jump_command"] = ObservationTermCfg(
             func=envs_mdp.generated_commands,
             params={"command_name": JUMP_COMMAND_NAME},
+        )
+        actor_terms["flight_phase_history"] = ObservationTermCfg(
+            func=_flight_phase_history_state,
+            history_length=100,
         )
 
     critic_terms = {**actor_terms}
