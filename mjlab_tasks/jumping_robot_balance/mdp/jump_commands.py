@@ -73,6 +73,15 @@ class JumpCommand(CommandTerm):
         self.was_airborne = torch.zeros_like(self.has_triggered)
         self.has_landed = torch.zeros_like(self.has_triggered)
         self.landing_event = torch.zeros(self.num_envs, device=self.device)
+        self.landing_recovery_time = torch.zeros(
+            self.num_envs,
+            device=self.device,
+        )
+        self.landing_recovery_complete = torch.zeros_like(self.has_triggered)
+        self.landing_recovery_success_event = torch.zeros(
+            self.num_envs,
+            device=self.device,
+        )
         self.landing_impact_speed = torch.zeros(
             self.num_envs,
             device=self.device,
@@ -110,6 +119,14 @@ class JumpCommand(CommandTerm):
             self.num_envs,
             device=self.device,
         )
+        self.metrics["landing_recovery_success"] = torch.zeros(
+            self.num_envs,
+            device=self.device,
+        )
+        self.metrics["landing_recovery_time"] = torch.zeros(
+            self.num_envs,
+            device=self.device,
+        )
         for phase_name in _TORQUE_PHASE_NAMES:
             for wheel_name in ("x", "y"):
                 self.metrics[
@@ -139,6 +156,10 @@ class JumpCommand(CommandTerm):
         self.metrics["apex_height"][:] = self.apex_height
         self.metrics["landing_impact_speed"][:] = self.landing_impact_speed
         self.metrics["landed"][:] = self.has_landed.float()
+        self.metrics["landing_recovery_success"][:] = (
+            self.landing_recovery_complete.float()
+        )
+        self.metrics["landing_recovery_time"][:] = self.landing_recovery_time
         sample_count = self._torque_sample_count.clamp_min(1.0).unsqueeze(-1)
         torque_mean = self._torque_abs_sum / sample_count
         torque_saturation = self._torque_saturation_count / sample_count
@@ -175,6 +196,9 @@ class JumpCommand(CommandTerm):
         self.was_airborne[env_ids] = False
         self.has_landed[env_ids] = False
         self.landing_event[env_ids] = 0.0
+        self.landing_recovery_time[env_ids] = 0.0
+        self.landing_recovery_complete[env_ids] = False
+        self.landing_recovery_success_event[env_ids] = 0.0
         self.landing_impact_speed[env_ids] = 0.0
         self._torque_sample_count[env_ids] = 0.0
         self._torque_abs_sum[env_ids] = 0.0
@@ -189,9 +213,10 @@ class JumpCommand(CommandTerm):
         if self.cfg.play:
             self.time_left[env_ids] = math.inf
 
-    def _update_command(self) -> None:
+    def _update_command(self, dt: float) -> None:
         self.apex_progress_delta.zero_()
         self.landing_event.zero_()
+        self.landing_recovery_success_event.zero_()
         while True:
             try:
                 env_idx = self._pending.get_nowait()
@@ -216,6 +241,29 @@ class JumpCommand(CommandTerm):
             min=0.0,
         )
         self.has_landed[touchdown] = True
+
+        recovering = self.has_landed & ~self.landing_recovery_complete
+        horizontal_gravity = torch.linalg.vector_norm(
+            self._robot.data.projected_gravity_b[:, :2],
+            dim=1,
+        )
+        angular_speed = torch.linalg.vector_norm(
+            self._robot.data.root_link_ang_vel_b,
+            dim=1,
+        )
+        upright_and_quiet = (
+            horizontal_gravity
+            <= math.sin(math.radians(self.cfg.landing_recovery_max_tilt_deg))
+        ) & (angular_speed <= self.cfg.landing_recovery_max_ang_vel_rad_s)
+        stable_recovery = recovering & contact & upright_and_quiet
+        self.landing_recovery_time[stable_recovery] += dt
+        self.landing_recovery_time[recovering & ~stable_recovery] = 0.0
+        recovered = stable_recovery & (
+            self.landing_recovery_time
+            >= self.cfg.landing_recovery_duration_s
+        )
+        self.landing_recovery_complete[recovered] = True
+        self.landing_recovery_success_event[recovered] = 1.0
 
         active = self._command[:, 0] > 0.5
         height_gain = torch.clamp(
@@ -276,7 +324,7 @@ class JumpCommand(CommandTerm):
         active = self._command[:, 0] > 0.5
         self.time_left[~active] -= dt
         self.active_time[active] += dt
-        self._update_command()
+        self._update_command(dt)
         self._update_metrics()
 
     def _trigger(self, env_ids: torch.Tensor) -> None:
@@ -292,6 +340,9 @@ class JumpCommand(CommandTerm):
         self.was_airborne[env_ids] = False
         self.has_landed[env_ids] = False
         self.landing_event[env_ids] = 0.0
+        self.landing_recovery_time[env_ids] = 0.0
+        self.landing_recovery_complete[env_ids] = False
+        self.landing_recovery_success_event[env_ids] = 0.0
         self.landing_impact_speed[env_ids] = 0.0
         self._previous_root_vertical_velocity[env_ids] = (
             self._robot.data.root_link_lin_vel_w[env_ids, 2]
@@ -339,6 +390,9 @@ class JumpCommandCfg(CommandTermCfg):
     play: bool = False
     command_duration_s: float = 1.5
     resampling_time_range: tuple[float, float] = (2.0, 4.0)
+    landing_recovery_duration_s: float = 0.5
+    landing_recovery_max_tilt_deg: float = 12.0
+    landing_recovery_max_ang_vel_rad_s: float = 3.0
 
     def build(self, env: ManagerBasedRlEnv) -> JumpCommand:
         return JumpCommand(self, env)

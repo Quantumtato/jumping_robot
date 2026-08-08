@@ -186,6 +186,11 @@ def landing_angular_velocity_l2(
     )
 
 
+def landing_recovery_success(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    term = _jump_term(env)
+    return term.landing_recovery_success_event * term.apex_height
+
+
 def balance_linear_action_rate_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return _balance_only(env, linear_action_rate_l2(env))
 
@@ -302,6 +307,10 @@ def build_reward_terms(
         terms["off_ground"].func = balance_off_ground
         terms["jump_apex_progress"] = RewardTermCfg(
             func=jump_apex_progress,
+            weight=10_000.0,
+        )
+        terms["landing_recovery_success"] = RewardTermCfg(
+            func=landing_recovery_success,
             weight=100_000.0,
         )
         terms["landing_impact_speed"] = RewardTermCfg(
