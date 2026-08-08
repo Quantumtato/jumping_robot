@@ -124,7 +124,7 @@ ACTUATORS = {
         default_stiction_ramp_nm_s=0.015,
         default_chirp_amplitude_nm=0.04,
         default_max_velocity_rad_s=600.0,
-        default_velocity_kd_nm_s_rad=0.02,
+        default_velocity_kd_nm_s_rad=0.01,
         default_friction_speeds_rad_s=(5.0, 15.0, 30.0, 40.0),
     ),
     "flywheel_y": ActuatorProfile(
@@ -585,22 +585,37 @@ class ExperimentRunner:
         started = time.monotonic()
         next_sample = started
         command = MotorCommand(velocity_rad_s=0.0, kd_nm_s_rad=kd_nm_s_rad)
+        previous_speed_abs: float | None = None
+        runaway_growth_margin = max(
+            0.05, self.movement_threshold_rad_s * 0.1
+        )
+        runaway_confirm_samples = max(3, math.ceil(0.15 / self.period_s))
+        runaway_samples = 0
 
         while time.monotonic() - started < self.brake_timeout_s:
             self._wait_for_slot(next_sample)
             feedback = self.sample(command, "rest", 0)
             now = time.monotonic()
-            minimum_braking_torque = max(0.002, self.profile.torque_max_nm * 0.02)
+            speed_abs = abs(feedback.velocity_rad_s)
+
             if (
-                abs(feedback.velocity_rad_s) > self.movement_threshold_rad_s
-                and abs(feedback.torque_nm) > minimum_braking_torque
-                and feedback.velocity_rad_s * feedback.torque_nm > 0.0
+                speed_abs > self.movement_threshold_rad_s
+                and previous_speed_abs is not None
+                and speed_abs > previous_speed_abs + runaway_growth_margin
             ):
+                runaway_samples += 1
+            else:
+                runaway_samples = 0
+
+            previous_speed_abs = speed_abs
+
+            if runaway_samples >= runaway_confirm_samples:
                 raise IdentificationError(
-                    "Controlled stop is adding energy instead of braking. "
-                    "Check the firmware velocity sign before continuing."
+                    "Controlled stop appears to be accelerating instead of braking "
+                    f"(speed reached {feedback.velocity_rad_s:+.2f} rad/s while "
+                    "targeting 0 rad/s)."
                 )
-            if abs(feedback.velocity_rad_s) <= self.movement_threshold_rad_s:
+            if speed_abs <= self.movement_threshold_rad_s:
                 stable_since = now if stable_since is None else stable_since
                 if now - stable_since >= self.rest_confirm_s:
                     self.run_timed(
