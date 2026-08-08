@@ -160,14 +160,6 @@ def balance_height_command_tracking(
     return height_command_tracking(env, asset_cfg) * (1.0 - _jump_active(env))
 
 
-def pre_jump_height_command_tracking(
-    env: "ManagerBasedRlEnv",
-    asset_cfg: SceneEntityCfg = _LINEAR_CFG,
-) -> torch.Tensor:
-    term = _jump_term(env)
-    return height_command_tracking(env, asset_cfg) * (~term.has_triggered)
-
-
 def balance_linear_velocity_l2(
     env: "ManagerBasedRlEnv",
     asset_cfg: SceneEntityCfg = _LINEAR_CFG,
@@ -319,6 +311,7 @@ def build_reward_terms(
             balance_linear_feedforward_rate_l2
         )
         terms["height_tracking"].func = balance_height_command_tracking
+        terms["height_tracking"].weight = 0.5
         terms["linear_velocity_action"].func = (
             balance_linear_velocity_action_l2
         )
@@ -326,11 +319,6 @@ def build_reward_terms(
             balance_linear_velocity_action_rate_l2
         )
         terms["off_ground"].func = balance_off_ground
-        terms["pre_jump_height_tracking"] = RewardTermCfg(
-            func=pre_jump_height_command_tracking,
-            weight=8.0,
-            params={"asset_cfg": _LINEAR_CFG},
-        )
         terms["pre_jump_linear_velocity"] = RewardTermCfg(
             func=pre_jump_linear_velocity_l2,
             weight=-0.05,
