@@ -252,7 +252,7 @@ def build_reward_terms(
         ),
         "tilt_error": RewardTermCfg(
             func=tilt_error_l2,
-            weight=-2.0,
+            weight=-4.0,
             params={"asset_cfg": _ROBOT_CFG},
         ),
         "base_angular_velocity": RewardTermCfg(
@@ -262,7 +262,7 @@ def build_reward_terms(
         ),
         "flywheel_speed": RewardTermCfg(
             func=flywheel_speed_l2,
-            weight=-0.2,
+            weight=-0.05,
             params={"asset_cfg": _FLYWHEEL_CFG},
         ),
         "linear_velocity": RewardTermCfg(
