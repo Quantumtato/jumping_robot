@@ -41,7 +41,9 @@ def jumping_robot_balance_env_cfg(
     height_control: bool = False,
     jump_stage_one: bool = False,
     jump_stage_two: bool = False,
+    robust_balance: bool = False,
 ) -> ManagerBasedRlEnvCfg:
+    jump_stage_two = jump_stage_two or robust_balance
     jump_stage_one = jump_stage_one or jump_stage_two
     height_control = height_control or jump_stage_one
     cfg = ManagerBasedRlEnvCfg(
@@ -73,6 +75,7 @@ def jumping_robot_balance_env_cfg(
             height_control=height_control,
             jump_stage_one=jump_stage_one,
             jump_stage_two=jump_stage_two,
+            robust_balance=robust_balance,
         ),
         terminations=build_termination_terms(),
         viewer=ViewerConfig(
@@ -94,9 +97,21 @@ def jumping_robot_balance_env_cfg(
         episode_length_s=EPISODE_LENGTH_S,
     )
 
-    commands = build_height_commands(play=play) if height_control else {}
+    commands = (
+        build_height_commands(
+            play=play,
+            full_stroke=robust_balance,
+        )
+        if height_control
+        else {}
+    )
     if jump_stage_two:
-        commands.update(build_jump_commands(play=play))
+        commands.update(
+            build_jump_commands(
+                play=play,
+                auto_trigger=not robust_balance,
+            )
+        )
     if play:
         cfg.episode_length_s = 1e10
         cfg.observations["actor"].enable_corruption = False

@@ -16,6 +16,7 @@ from mjlab_tasks.jumping_robot_balance.mdp.height_curriculum import (
     scheduled_height_half_width,
 )
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
+    LINEAR_RANGE_HALF_WIDTH_M,
     LINEAR_RANGE_CENTER_M,
     LINEAR_RANGE_MAX_M,
     LINEAR_RANGE_MIN_M,
@@ -128,10 +129,18 @@ class HeightCommandCfg(CommandTermCfg):
         return HeightCommand(self, env)
 
 
-def build_height_commands(play: bool = False) -> dict[str, CommandTermCfg]:
+def build_height_commands(
+    play: bool = False,
+    full_stroke: bool = False,
+) -> dict[str, CommandTermCfg]:
     return {
         HEIGHT_COMMAND_NAME: HeightCommandCfg(
             play=play,
+            range_schedule=(
+                ((0, LINEAR_RANGE_HALF_WIDTH_M),)
+                if full_stroke
+                else HEIGHT_RANGE_SCHEDULE
+            ),
             resampling_time_range=(1.0e9, 1.0e9) if play else (4.0, 8.0),
         )
     }

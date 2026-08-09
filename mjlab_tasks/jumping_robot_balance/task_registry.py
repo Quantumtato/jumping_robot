@@ -16,6 +16,7 @@ TASK_ID = "Mjlab-Balance-JumpingRobot-v0"
 HEIGHT_TASK_ID = "Mjlab-Balance-Height-JumpingRobot-v0"
 JUMP_STAGE_ONE_TASK_ID = "Mjlab-Jump-Stage1-JumpingRobot-v0"
 JUMP_STAGE_TWO_TASK_ID = "Mjlab-Jump-Stage2-JumpingRobot-v0"
+ROBUST_BALANCE_TASK_ID = "Mjlab-Robust-Balance-JumpingRobot-v0"
 
 
 def register_tasks() -> None:
@@ -57,4 +58,14 @@ def register_tasks() -> None:
             ),
             rl_cfg=jumping_robot_balance_ppo_runner_cfg(),
             runner_cls=JumpStageTwoRunner,
+        )
+    if ROBUST_BALANCE_TASK_ID not in registered:
+        register_mjlab_task(
+            task_id=ROBUST_BALANCE_TASK_ID,
+            env_cfg=jumping_robot_balance_env_cfg(robust_balance=True),
+            play_env_cfg=jumping_robot_balance_env_cfg(
+                play=True,
+                robust_balance=True,
+            ),
+            rl_cfg=jumping_robot_balance_ppo_runner_cfg(),
         )

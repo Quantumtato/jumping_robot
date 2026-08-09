@@ -231,7 +231,7 @@ class JumpCommand(CommandTerm):
 
         inactive = self._command[:, 0] < 0.5
         auto_trigger = inactive & ~self.has_triggered & (self.time_left <= 0.0)
-        if not self.cfg.play and torch.any(auto_trigger):
+        if self.cfg.auto_trigger and not self.cfg.play and torch.any(auto_trigger):
             self._trigger(auto_trigger.nonzero().flatten())
 
         contact = foot_ground_contact(self._env)[:, 0] > 0.5
@@ -399,6 +399,7 @@ class JumpCommand(CommandTerm):
 @dataclass(kw_only=True)
 class JumpCommandCfg(CommandTermCfg):
     play: bool = False
+    auto_trigger: bool = True
     command_duration_s: float = 1.5
     resampling_time_range: tuple[float, float] = (2.0, 4.0)
     landing_recovery_duration_s: float = 0.5
@@ -410,10 +411,14 @@ class JumpCommandCfg(CommandTermCfg):
         return JumpCommand(self, env)
 
 
-def build_jump_commands(play: bool = False) -> dict[str, CommandTermCfg]:
+def build_jump_commands(
+    play: bool = False,
+    auto_trigger: bool = True,
+) -> dict[str, CommandTermCfg]:
     return {
         JUMP_COMMAND_NAME: JumpCommandCfg(
             play=play,
+            auto_trigger=auto_trigger,
             resampling_time_range=(1.0e9, 1.0e9) if play else (2.0, 4.0),
         )
     }

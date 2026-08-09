@@ -187,6 +187,7 @@ def build_reward_terms(
     height_control: bool = False,
     jump_stage_one: bool = False,
     jump_stage_two: bool = False,
+    robust_balance: bool = False,
 ) -> dict[str, RewardTermCfg]:
     terms = {
         "alive": RewardTermCfg(func=envs_mdp.is_alive, weight=1.0),
@@ -255,4 +256,17 @@ def build_reward_terms(
             weight=-250.0,
             params={"asset_cfg": _ROBOT_CFG},
         )
+    if robust_balance:
+        terms["tilt_error"].weight = -8.0
+        terms["base_angular_velocity"].weight = -0.2
+        terms["action_rate"].weight = -0.005
+        terms["height_tracking"].weight = 0.5
+        for name in (
+            "off_ground",
+            "jump_apex_progress",
+            "landing_recovery_success",
+            "landing_impact_speed",
+            "landing_angular_velocity",
+        ):
+            terms.pop(name, None)
     return terms

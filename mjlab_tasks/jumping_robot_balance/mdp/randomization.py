@@ -19,6 +19,7 @@ from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FOOT_COLLISION_LOW_ENDPOINT_AT_ZERO_M,
     LINEAR_JOINT,
     LINEAR_RANGE_CENTER_M,
+    LINEAR_RANGE_HALF_WIDTH_M,
     ROBOT_ENTITY_NAME,
 )
 
@@ -198,8 +199,10 @@ def build_robustness_events() -> dict[str, EventTermCfg]:
 def reset_height_control_state(
     env,
     env_ids: torch.Tensor | None,
+    range_schedule: tuple[tuple[int, float], ...] | None = None,
 ) -> None:
     from mjlab_tasks.jumping_robot_balance.mdp.height_curriculum import (
+        HEIGHT_RANGE_SCHEDULE,
         scheduled_height_half_width,
     )
 
@@ -229,7 +232,10 @@ def reset_height_control_state(
         dtype=torch.long,
         device=env.device,
     )
-    half_width = scheduled_height_half_width(env.common_step_counter)
+    half_width = scheduled_height_half_width(
+        env.common_step_counter,
+        range_schedule if range_schedule is not None else HEIGHT_RANGE_SCHEDULE,
+    )
     linear_pos = default_joint_pos[env_ids][:, linear_ids].clone()
     linear_pos += sample_uniform(
         -half_width,
@@ -251,12 +257,21 @@ def reset_height_control_state(
     )
 
 
-def build_height_robustness_events() -> dict[str, EventTermCfg]:
+def build_height_robustness_events(
+    full_stroke: bool = False,
+) -> dict[str, EventTermCfg]:
     events = build_robustness_events()
     del events["reset_base"]
     events["reset_robot_state"] = EventTermCfg(
         func=reset_height_control_state,
         mode="reset",
+        params={
+            "range_schedule": (
+                ((0, LINEAR_RANGE_HALF_WIDTH_M),)
+                if full_stroke
+                else None
+            )
+        },
     )
     return events
 

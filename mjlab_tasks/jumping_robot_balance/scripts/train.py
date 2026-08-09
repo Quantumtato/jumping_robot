@@ -27,6 +27,7 @@ def main() -> None:
         HEIGHT_TASK_ID,
         JUMP_STAGE_ONE_TASK_ID,
         JUMP_STAGE_TWO_TASK_ID,
+        ROBUST_BALANCE_TASK_ID,
         TASK_ID,
         register_tasks,
     )
@@ -38,7 +39,14 @@ def main() -> None:
     parser.add_argument("--log-root", default="logs/rsl_rl")
     parser.add_argument(
         "--stage",
-        choices=("nominal", "robust", "height", "jump-stage-1", "jump-stage-2"),
+        choices=(
+            "nominal",
+            "robust",
+            "height",
+            "robust-balance",
+            "jump-stage-1",
+            "jump-stage-2",
+        ),
         default="nominal",
         help="Training curriculum stage.",
     )
@@ -59,6 +67,7 @@ def main() -> None:
         "height": HEIGHT_TASK_ID,
         "jump-stage-1": JUMP_STAGE_ONE_TASK_ID,
         "jump-stage-2": JUMP_STAGE_TWO_TASK_ID,
+        "robust-balance": ROBUST_BALANCE_TASK_ID,
     }.get(args.stage, TASK_ID)
     cfg = TrainConfig.from_task(task_id)
     cfg.env.scene.num_envs = args.num_envs
@@ -95,16 +104,26 @@ def main() -> None:
         cfg.agent.algorithm.schedule = "fixed"
         cfg.agent.algorithm.entropy_coef = 5.0e-4
         cfg.agent.run_name = "jump_stage_1"
-    elif args.stage == "jump-stage-2":
+    elif args.stage in ("robust-balance", "jump-stage-2"):
         from mjlab_tasks.jumping_robot_balance.mdp import (
             build_jump_stage_two_events,
         )
 
-        cfg.env.events = build_jump_stage_two_events()
-        cfg.agent.algorithm.learning_rate = 2.5e-5
+        if args.stage == "robust-balance":
+            from mjlab_tasks.jumping_robot_balance.mdp import (
+                build_height_robustness_events,
+            )
+
+            cfg.env.events = build_height_robustness_events(full_stroke=True)
+            cfg.agent.algorithm.learning_rate = 1.0e-4
+            cfg.agent.algorithm.entropy_coef = 5.0e-4
+            cfg.agent.run_name = "robust_balance_100hz"
+        else:
+            cfg.env.events = build_jump_stage_two_events()
+            cfg.agent.algorithm.learning_rate = 2.5e-5
+            cfg.agent.algorithm.entropy_coef = 2.0e-4
+            cfg.agent.run_name = "jump_stage_2"
         cfg.agent.algorithm.schedule = "fixed"
-        cfg.agent.algorithm.entropy_coef = 2.0e-4
-        cfg.agent.run_name = "jump_stage_2"
 
     if args.resume_from is not None:
         resume_path = Path(args.resume_from).resolve()

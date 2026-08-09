@@ -23,6 +23,7 @@ def main() -> None:
         HEIGHT_TASK_ID,
         JUMP_STAGE_ONE_TASK_ID,
         JUMP_STAGE_TWO_TASK_ID,
+        ROBUST_BALANCE_TASK_ID,
         TASK_ID,
         register_tasks,
     )
@@ -53,7 +54,12 @@ def main() -> None:
     mode.add_argument(
         "--jump-stage-1",
         action="store_true",
-        help="Use the five-action jump Stage 1 task.",
+        help="Use the three-action jump Stage 1 task.",
+    )
+    mode.add_argument(
+        "--robust-balance",
+        action="store_true",
+        help="Use the history-equipped robust balance task without automatic jumps.",
     )
     mode.add_argument(
         "--jump-stage-2",
@@ -73,7 +79,9 @@ def main() -> None:
         viewer=args.viewer,
         no_terminations=args.no_terminations,
     )
-    if args.jump_stage_2:
+    if args.robust_balance:
+        task_id = ROBUST_BALANCE_TASK_ID
+    elif args.jump_stage_2:
         task_id = JUMP_STAGE_TWO_TASK_ID
     elif args.jump_stage_1:
         task_id = JUMP_STAGE_ONE_TASK_ID
