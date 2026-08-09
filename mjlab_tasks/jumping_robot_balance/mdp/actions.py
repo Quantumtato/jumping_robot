@@ -78,7 +78,6 @@ class LinearPositionAction(ActionTerm):
     def position_target(self) -> torch.Tensor:
         return self._position_target
 
-    @property
     def process_actions(self, actions: torch.Tensor) -> None:
         self._raw_actions[:] = actions
         action_gate = 1.0
@@ -113,6 +112,7 @@ class LinearPositionAction(ActionTerm):
             min=-max_delta,
             max=max_delta,
         )
+
     def apply_actions(self) -> None:
         position = self._entity.data.joint_pos[:, self._target_ids]
         velocity = self._entity.data.joint_vel[:, self._target_ids]
@@ -169,8 +169,6 @@ def build_action_terms() -> dict[str, ActionTermCfg]:
         ),
         "linear_position": LinearPositionActionCfg(
             entity_name=ROBOT_ENTITY_NAME,
-            # Preserve the third policy output while holding the leg fixed during
-            # the nominal balance curriculum stage.
         ),
     }
 
