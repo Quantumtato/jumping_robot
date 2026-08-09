@@ -15,6 +15,7 @@ from mjlab_tasks.jumping_robot_balance.mdp import (
     build_disturbance_commands,
     build_height_action_terms,
     build_height_commands,
+    build_height_robustness_events,
     build_jump_stage_one_action_terms,
     build_jump_commands,
     build_observation_groups,
@@ -70,7 +71,11 @@ def jumping_robot_balance_env_cfg(
                 else build_action_terms()
             )
         ),
-        events=build_randomization_events(),
+        events=(
+            build_height_robustness_events(full_stroke=True)
+            if robust_balance
+            else build_randomization_events()
+        ),
         rewards=build_reward_terms(
             height_control=height_control,
             jump_stage_one=jump_stage_one,
