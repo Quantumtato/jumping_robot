@@ -18,7 +18,6 @@ from mjlab_tasks.jumping_robot_balance.mdp.contact import foot_ground_contact
 from mjlab_tasks.jumping_robot_balance.robot_cfg import (
     FLYWHEEL_X_JOINT,
     FLYWHEEL_Y_JOINT,
-    MAX_FLYWHEEL_TORQUE_NM,
     MAX_FLYWHEEL_SPEED_RAD_S,
     ROBOT_ENTITY_NAME,
 )
@@ -30,7 +29,7 @@ if TYPE_CHECKING:
 
 JUMP_COMMAND_NAME = "jump"
 _ROBOT_CFG = SceneEntityCfg(ROBOT_ENTITY_NAME)
-_TORQUE_PHASE_NAMES = (
+_WHEEL_PHASE_NAMES = (
     "pre_jump",
     "jump_grounded",
     "flight",
@@ -90,23 +89,25 @@ class JumpCommand(CommandTerm):
         self._previous_root_vertical_velocity = (
             self._robot.data.root_link_lin_vel_w[:, 2].clone()
         )
-        phase_count = len(_TORQUE_PHASE_NAMES)
-        self._torque_sample_count = torch.zeros(
+        phase_count = len(_WHEEL_PHASE_NAMES)
+        self._wheel_sample_count = torch.zeros(
             self.num_envs,
             phase_count,
             device=self.device,
         )
-        self._torque_abs_sum = torch.zeros(
+        self._target_speed_abs_sum = torch.zeros(
             self.num_envs,
             phase_count,
             2,
             device=self.device,
         )
-        self._torque_abs_peak = torch.zeros_like(self._torque_abs_sum)
-        self._torque_saturation_count = torch.zeros_like(self._torque_abs_sum)
-        self._speed_abs_sum = torch.zeros_like(self._torque_abs_sum)
-        self._speed_abs_peak = torch.zeros_like(self._torque_abs_sum)
-        self._speed_saturation_count = torch.zeros_like(self._torque_abs_sum)
+        self._target_speed_abs_peak = torch.zeros_like(self._target_speed_abs_sum)
+        self._target_speed_saturation_count = torch.zeros_like(
+            self._target_speed_abs_sum
+        )
+        self._speed_abs_sum = torch.zeros_like(self._target_speed_abs_sum)
+        self._speed_abs_peak = torch.zeros_like(self._target_speed_abs_sum)
+        self._speed_saturation_count = torch.zeros_like(self._target_speed_abs_sum)
         self._pending: SimpleQueue[int] = SimpleQueue()
         self.metrics["apex_height"] = torch.zeros(
             self.num_envs,
@@ -128,16 +129,16 @@ class JumpCommand(CommandTerm):
             self.num_envs,
             device=self.device,
         )
-        for phase_name in _TORQUE_PHASE_NAMES:
+        for phase_name in _WHEEL_PHASE_NAMES:
             for wheel_name in ("x", "y"):
                 self.metrics[
-                    f"flywheel_{phase_name}_{wheel_name}_mean_abs_torque"
+                    f"flywheel_{phase_name}_{wheel_name}_mean_abs_target_speed"
                 ] = torch.zeros(self.num_envs, device=self.device)
                 self.metrics[
-                    f"flywheel_{phase_name}_{wheel_name}_peak_abs_torque"
+                    f"flywheel_{phase_name}_{wheel_name}_peak_abs_target_speed"
                 ] = torch.zeros(self.num_envs, device=self.device)
                 self.metrics[
-                    f"flywheel_{phase_name}_{wheel_name}_saturation_fraction"
+                    f"flywheel_{phase_name}_{wheel_name}_target_speed_saturation_fraction"
                 ] = torch.zeros(self.num_envs, device=self.device)
                 self.metrics[
                     f"flywheel_{phase_name}_{wheel_name}_mean_abs_speed"
@@ -161,22 +162,22 @@ class JumpCommand(CommandTerm):
             self.landing_recovery_complete.float()
         )
         self.metrics["landing_recovery_time"][:] = self.landing_recovery_time
-        sample_count = self._torque_sample_count.clamp_min(1.0).unsqueeze(-1)
-        torque_mean = self._torque_abs_sum / sample_count
-        torque_saturation = self._torque_saturation_count / sample_count
+        sample_count = self._wheel_sample_count.clamp_min(1.0).unsqueeze(-1)
+        target_speed_mean = self._target_speed_abs_sum / sample_count
+        target_speed_saturation = self._target_speed_saturation_count / sample_count
         speed_mean = self._speed_abs_sum / sample_count
         speed_saturation = self._speed_saturation_count / sample_count
-        for phase_id, phase_name in enumerate(_TORQUE_PHASE_NAMES):
+        for phase_id, phase_name in enumerate(_WHEEL_PHASE_NAMES):
             for wheel_id, wheel_name in enumerate(("x", "y")):
                 self.metrics[
-                    f"flywheel_{phase_name}_{wheel_name}_mean_abs_torque"
-                ][:] = torque_mean[:, phase_id, wheel_id]
+                    f"flywheel_{phase_name}_{wheel_name}_mean_abs_target_speed"
+                ][:] = target_speed_mean[:, phase_id, wheel_id]
                 self.metrics[
-                    f"flywheel_{phase_name}_{wheel_name}_peak_abs_torque"
-                ][:] = self._torque_abs_peak[:, phase_id, wheel_id]
+                    f"flywheel_{phase_name}_{wheel_name}_peak_abs_target_speed"
+                ][:] = self._target_speed_abs_peak[:, phase_id, wheel_id]
                 self.metrics[
-                    f"flywheel_{phase_name}_{wheel_name}_saturation_fraction"
-                ][:] = torque_saturation[:, phase_id, wheel_id]
+                    f"flywheel_{phase_name}_{wheel_name}_target_speed_saturation_fraction"
+                ][:] = target_speed_saturation[:, phase_id, wheel_id]
                 self.metrics[
                     f"flywheel_{phase_name}_{wheel_name}_mean_abs_speed"
                 ][:] = speed_mean[:, phase_id, wheel_id]
@@ -202,10 +203,10 @@ class JumpCommand(CommandTerm):
         self.landing_recovery_complete[env_ids] = False
         self.landing_recovery_success_event[env_ids] = 0.0
         self.landing_impact_speed[env_ids] = 0.0
-        self._torque_sample_count[env_ids] = 0.0
-        self._torque_abs_sum[env_ids] = 0.0
-        self._torque_abs_peak[env_ids] = 0.0
-        self._torque_saturation_count[env_ids] = 0.0
+        self._wheel_sample_count[env_ids] = 0.0
+        self._target_speed_abs_sum[env_ids] = 0.0
+        self._target_speed_abs_peak[env_ids] = 0.0
+        self._target_speed_saturation_count[env_ids] = 0.0
         self._speed_abs_sum[env_ids] = 0.0
         self._speed_abs_peak[env_ids] = 0.0
         self._speed_saturation_count[env_ids] = 0.0
@@ -291,7 +292,7 @@ class JumpCommand(CommandTerm):
             self._robot.data.root_link_lin_vel_w[:, 2]
         )
 
-    def _accumulate_torque_metrics(self) -> None:
+    def _accumulate_wheel_metrics(self) -> None:
         contact = foot_ground_contact(self._env)[:, 0] > 0.5
         phase = torch.full(
             (self.num_envs,),
@@ -303,20 +304,20 @@ class JumpCommand(CommandTerm):
         phase[(self._command[:, 0] > 0.5) & contact] = 1
         phase[self.has_landed] = 3
 
-        torque = torch.clamp(
+        target_speed = torch.clamp(
             self._env.action_manager.action[:, :2],
             min=-1.0,
             max=1.0,
-        ).abs() * MAX_FLYWHEEL_TORQUE_NM
+        ).abs() * MAX_FLYWHEEL_SPEED_RAD_S
         env_ids = torch.arange(self.num_envs, device=self.device)
-        self._torque_sample_count[env_ids, phase] += 1.0
-        self._torque_abs_sum[env_ids, phase] += torque
-        self._torque_abs_peak[env_ids, phase] = torch.maximum(
-            self._torque_abs_peak[env_ids, phase],
-            torque,
+        self._wheel_sample_count[env_ids, phase] += 1.0
+        self._target_speed_abs_sum[env_ids, phase] += target_speed
+        self._target_speed_abs_peak[env_ids, phase] = torch.maximum(
+            self._target_speed_abs_peak[env_ids, phase],
+            target_speed,
         )
-        self._torque_saturation_count[env_ids, phase] += (
-            torque >= 0.99 * MAX_FLYWHEEL_TORQUE_NM
+        self._target_speed_saturation_count[env_ids, phase] += (
+            target_speed >= 0.99 * MAX_FLYWHEEL_SPEED_RAD_S
         )
         speed = self._robot.data.joint_vel[:, self._flywheel_joint_ids].abs()
         self._speed_abs_sum[env_ids, phase] += speed
@@ -329,7 +330,7 @@ class JumpCommand(CommandTerm):
         )
 
     def compute(self, dt: float) -> None:
-        self._accumulate_torque_metrics()
+        self._accumulate_wheel_metrics()
         active = self._command[:, 0] > 0.5
         self.time_left[~active] -= dt
         self.active_time[active] += dt

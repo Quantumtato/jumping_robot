@@ -86,32 +86,12 @@ def linear_velocity_l2(
 
 
 def _linear_action_start(env: "ManagerBasedRlEnv") -> int:
-    term = env.action_manager.get_term("linear_impedance")
+    term = env.action_manager.get_term("linear_position")
     return env.action_manager.total_action_dim - term.action_dim
 
 
 def linear_action_rate_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
     index = _linear_action_start(env)
-    delta = env.action_manager.action[:, index] - env.action_manager.prev_action[:, index]
-    return torch.square(delta)
-
-
-def linear_feedforward_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
-    return torch.square(env.action_manager.action[:, -1])
-
-
-def linear_feedforward_rate_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
-    delta = env.action_manager.action[:, -1] - env.action_manager.prev_action[:, -1]
-    return torch.square(delta)
-
-
-def linear_velocity_action_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
-    index = _linear_action_start(env) + 1
-    return torch.square(env.action_manager.action[:, index])
-
-
-def linear_velocity_action_rate_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
-    index = _linear_action_start(env) + 1
     delta = env.action_manager.action[:, index] - env.action_manager.prev_action[:, index]
     return torch.square(delta)
 
@@ -195,28 +175,6 @@ def balance_linear_action_rate_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return _balance_only(env, linear_action_rate_l2(env))
 
 
-def balance_linear_feedforward_l2(env: "ManagerBasedRlEnv") -> torch.Tensor:
-    return _balance_only(env, linear_feedforward_l2(env))
-
-
-def balance_linear_feedforward_rate_l2(
-    env: "ManagerBasedRlEnv",
-) -> torch.Tensor:
-    return _balance_only(env, linear_feedforward_rate_l2(env))
-
-
-def balance_linear_velocity_action_l2(
-    env: "ManagerBasedRlEnv",
-) -> torch.Tensor:
-    return _balance_only(env, linear_velocity_action_l2(env))
-
-
-def balance_linear_velocity_action_rate_l2(
-    env: "ManagerBasedRlEnv",
-) -> torch.Tensor:
-    return _balance_only(env, linear_velocity_action_rate_l2(env))
-
-
 def fell_over(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return envs_mdp.bad_orientation(
         env,
@@ -267,44 +225,18 @@ def build_reward_terms(
             func=linear_action_rate_l2,
             weight=-0.005,
         )
-        terms["linear_feedforward"] = RewardTermCfg(
-            func=linear_feedforward_l2,
-            weight=-0.002,
-        )
-        terms["linear_feedforward_rate"] = RewardTermCfg(
-            func=linear_feedforward_rate_l2,
-            weight=-0.002,
-        )
         terms["height_tracking"] = RewardTermCfg(
             func=height_command_tracking,
             weight=2.0,
             params={"asset_cfg": _LINEAR_CFG},
         )
     if jump_stage_one or jump_stage_two:
-        terms["linear_velocity_action"] = RewardTermCfg(
-            func=linear_velocity_action_l2,
-            weight=-0.001,
-        )
-        terms["linear_velocity_action_rate"] = RewardTermCfg(
-            func=linear_velocity_action_rate_l2,
-            weight=-0.002,
-        )
         terms["off_ground"] = RewardTermCfg(func=off_ground, weight=-2.0)
     if jump_stage_two:
         terms["linear_velocity"].func = balance_linear_velocity_l2
         terms["linear_action_rate"].func = balance_linear_action_rate_l2
-        terms["linear_feedforward"].func = balance_linear_feedforward_l2
-        terms["linear_feedforward_rate"].func = (
-            balance_linear_feedforward_rate_l2
-        )
         terms["height_tracking"].func = balance_height_command_tracking
         terms["height_tracking"].weight = 0.5
-        terms["linear_velocity_action"].func = (
-            balance_linear_velocity_action_l2
-        )
-        terms["linear_velocity_action_rate"].func = (
-            balance_linear_velocity_action_rate_l2
-        )
         terms["off_ground"].func = balance_off_ground
         terms["jump_apex_progress"] = RewardTermCfg(
             func=jump_apex_progress,

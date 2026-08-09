@@ -76,8 +76,12 @@
     <material name="foot_collision_material" rgba="0.552982 0.617831 0.721554 1"/>
   </asset>
   <actuator>
-    <motor name="flywheelX" joint="flywheelX" ctrllimited="true" ctrlrange="-0.33 0.33"/>
-    <motor name="flywheelY" joint="flywheelY" ctrllimited="true" ctrlrange="-0.33 0.33"/>
+    <velocity name="flywheelX" joint="flywheelX" kv="0.0033"
+              ctrllimited="true" ctrlrange="-1500 1500"
+              forcelimited="true" forcerange="-0.33 0.33"/>
+    <velocity name="flywheelY" joint="flywheelY" kv="0.0033"
+              ctrllimited="true" ctrlrange="-1500 1500"
+              forcelimited="true" forcerange="-0.33 0.33"/>
     <motor name="linear" joint="linear" ctrllimited="true" ctrlrange="-120 120"
            forcelimited="true" forcerange="-120 120"/>
   </actuator>

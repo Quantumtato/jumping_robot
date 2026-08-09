@@ -71,20 +71,13 @@ def _normalized_height_command(env: "ManagerBasedRlEnv") -> torch.Tensor:
 def _normalized_linear_position_target(
     env: "ManagerBasedRlEnv",
 ) -> torch.Tensor:
-    target = env.action_manager.get_term("linear_impedance").position_target
+    target = env.action_manager.get_term("linear_position").position_target
     return (
         2.0
         * (target - LINEAR_RANGE_MIN_M)
         / (LINEAR_RANGE_MAX_M - LINEAR_RANGE_MIN_M)
         - 1.0
     )
-
-
-def _normalized_linear_velocity_target(
-    env: "ManagerBasedRlEnv",
-) -> torch.Tensor:
-    term = env.action_manager.get_term("linear_impedance")
-    return term.velocity_target / term.cfg.velocity_target_scale_m_s
 
 
 def _privileged_root_height(env: "ManagerBasedRlEnv") -> torch.Tensor:
@@ -127,7 +120,6 @@ def _flight_phase_history_state(env: "ManagerBasedRlEnv") -> torch.Tensor:
                 LINEAR_MAX_SPEED_M_S,
                 _LINEAR_CFG,
             ),
-            _normalized_linear_velocity_target(env),
             envs_mdp.last_action(env),
             foot_ground_contact(env),
             env.command_manager.get_command(JUMP_COMMAND_NAME),
@@ -179,9 +171,6 @@ def build_observation_groups(
             func=_normalized_linear_position_target,
         )
     if jump_stage_one or jump_stage_two:
-        actor_terms["linear_velocity_target"] = ObservationTermCfg(
-            func=_normalized_linear_velocity_target,
-        )
         actor_terms["foot_contact"] = ObservationTermCfg(
             func=foot_ground_contact,
         )

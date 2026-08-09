@@ -18,8 +18,8 @@ FLYWHEEL_X_JOINT = "flywheelX"
 FLYWHEEL_Y_JOINT = "flywheelY"
 LINEAR_JOINT = "linear"
 
-MAX_FLYWHEEL_TORQUE_NM = 0.33
 MAX_FLYWHEEL_SPEED_RAD_S = 1500.0
+MAX_FLYWHEEL_TORQUE_NM = 0.33
 LINEAR_MAX_FORCE_N = 120.0
 LINEAR_MAX_SPEED_M_S = 60.0
 LINEAR_MAX_STROKE_M = 0.152
@@ -34,9 +34,9 @@ LINEAR_RANGE_MAX_M = 0.010141930848105107
 LINEAR_RANGE_CENTER_M = 0.5 * (LINEAR_RANGE_MIN_M + LINEAR_RANGE_MAX_M)
 LINEAR_RANGE_HALF_WIDTH_M = 0.5 * (LINEAR_RANGE_MAX_M - LINEAR_RANGE_MIN_M)
 
-CONTROL_FREQUENCY_HZ = 1000
+CONTROL_FREQUENCY_HZ = 100
 SIM_TIMESTEP_S = 0.0005
-SIM_DECIMATION = 2
+SIM_DECIMATION = 20
 
 EPISODE_LENGTH_S = 20.0
 # The foot collision capsule's lower endpoint is 17.5 mm above the base at
@@ -59,7 +59,7 @@ ROBOT_ARTICULATION = EntityArticulationInfoCfg(
     actuators=(
         XmlActuatorCfg(
             target_names_expr=(FLYWHEEL_X_JOINT, FLYWHEEL_Y_JOINT),
-            command_field="effort",
+            command_field="velocity",
         ),
         XmlActuatorCfg(
             target_names_expr=(LINEAR_JOINT,),
