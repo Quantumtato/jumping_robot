@@ -1,0 +1,29 @@
+[
+  {
+    "name": "linear_init_position",
+    "description": "Initial linear joint position sweep (meters).",
+    "value_range": [
+      -0.1458580691518949,
+      0.010141930848105107
+    ],
+    "steps": 9
+  },
+  {
+    "name": "com_x_offset",
+    "description": "Center-of-mass X offset sweep (meters).",
+    "value_range": [
+      -0.006,
+      0.006
+    ],
+    "steps": 7
+  },
+  {
+    "name": "push_xy_velocity",
+    "description": "Disturbance push velocity sweep (m/s).",
+    "value_range": [
+      0.0,
+      0.5
+    ],
+    "steps": 6
+  }
+]

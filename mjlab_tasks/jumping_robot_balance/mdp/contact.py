@@ -48,6 +48,12 @@ def _contact_ids(
     return cached
 
 
+def foot_height_w(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """World z of the foot body frame, one value per env."""
+    _, foot_body_id = _contact_ids(env)
+    return env.sim.data.xpos[:, foot_body_id, 2]
+
+
 def foot_ground_contact(env: "ManagerBasedRlEnv") -> torch.Tensor:
     """Return one when any foot geometry contacts the terrain."""
     terrain_geom_id, foot_body_id = _contact_ids(env)

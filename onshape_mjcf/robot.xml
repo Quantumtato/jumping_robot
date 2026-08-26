@@ -54,10 +54,27 @@
         <!-- Joint from baserotor to foot -->
         <joint axis="0 0 1" name="linear" type="slide" range="-0.1458580691518949 0.010141930848105107"/>
         <inertial pos="0.00255765 0.00254489 0.126795" mass="0.236077" fullinertia="0.00278293 0.00278293 6.80011e-05 5.34476e-06 4.05765e-06 4.00316e-06"/>
-        <geom class="collision" type="capsule" fromto="0 0 -0.045642 0 0 0.260358" size="0.028" rgba="1 0 0 0.2"/>
+        <!-- condim=4 adds torsional friction so the rubber foot's contact
+             patch absorbs ballscrew reaction torque during push-off instead
+             of pivoting freely (phantom yaw authority). Torsional
+             coefficient ~ mu * patch radius: 1.0 * ~5 mm = 0.005 m.
+             CAD-estimated; replace via sysid. -->
+        <geom class="collision" type="capsule" fromto="0 0 -0.045642 0 0 0.260358" size="0.028" rgba="1 0 0 0.2" condim="4" friction="1.0 0.005 0.0001"/>
         <!-- Part foot_parts -->
         <geom type="mesh" class="visual" pos="0.00255765 0.00254489 0.126795" quat="0 0.707107 -0.707107 -0" mesh="foot_collision" material="foot_visual_material"/>
-        <geom type="mesh" class="collision" pos="0.00255765 0.00254489 0.126795" quat="0 0.707107 -0.707107 -0" mesh="foot_collision" material="foot_collision_material"/>
+        <geom type="mesh" class="collision" pos="0.00255765 0.00254489 0.126795" quat="0 0.707107 -0.707107 -0" mesh="foot_collision" material="foot_collision_material" condim="4" friction="1.0 0.005 0.0001"/>
+      </body>
+      <!-- Leg ballscrew rotor (CAD inertia 18.63023 kg*mm^2, sysid pending):
+           explicit spinning body coupled to the slide so leg acceleration
+           produces BOTH reflected inertia (J*(2pi/lead)^2 ~ 0.46 kg) and
+           yaw reaction torque on the base (~0.1 N*m at hard push-off).
+           Token mass at the base sphere center; only spin inertia matters.
+           MuJoCo armature alone would add the reflected inertia but no
+           reaction torque. -->
+      <body name="legrotor" pos="0 0 0.234258">
+        <joint axis="0 0 1" name="legrotor" type="hinge"
+               armature="0" frictionloss="0" damping="0"/>
+        <inertial pos="0 0 0" mass="0.005" diaginertia="1e-05 1e-05 1.863023e-05"/>
       </body>
     </body>
   </worldbody>
@@ -89,5 +106,11 @@
     <exclude body1="flywheel" body2="foot"/>
     <exclude body1="flywheel_2" body2="foot"/>
   </contact>
-  <equality/>
+  <equality>
+    <!-- Ballscrew kinematic coupling: rotor angle = (2*pi / 0.040 m lead) *
+         slide position = 157.0796 rad/m. Sign convention chosen arbitrarily
+         (positive slide spins rotor positive about base z); flip the linear
+         coefficient's sign if hardware spins the other way. -->
+    <joint joint1="legrotor" joint2="linear" polycoef="0 157.0796327 0 0 0"/>
+  </equality>
 </mujoco>

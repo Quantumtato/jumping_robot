@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import mujoco
@@ -17,6 +18,13 @@ BASE_BODY_NAME = "baserotor"
 FLYWHEEL_X_JOINT = "flywheelX"
 FLYWHEEL_Y_JOINT = "flywheelY"
 LINEAR_JOINT = "linear"
+LEG_ROTOR_JOINT = "legrotor"
+
+# Ballscrew drive: 40 mm lead, no gearing. Rotor inertia is the CAD value
+# for all spinning parts; replace with the sysid fit when available.
+LEG_ROTOR_INERTIA_KG_M2 = 1.863023e-05
+SCREW_LEAD_M = 0.040
+SCREW_COUPLING_RAD_PER_M = 2.0 * math.pi / SCREW_LEAD_M
 
 MAX_FLYWHEEL_SPEED_RAD_S = 1500.0
 MAX_FLYWHEEL_TORQUE_NM = 0.33
@@ -75,6 +83,9 @@ ROBOT_INITIAL_STATE = EntityCfg.InitialStateCfg(
         FLYWHEEL_X_JOINT: 0.0,
         FLYWHEEL_Y_JOINT: 0.0,
         LINEAR_JOINT: LINEAR_RANGE_CENTER_M,
+        # Consistent with the ballscrew equality constraint at the default
+        # slide position; a mismatch here would snap-load the constraint.
+        LEG_ROTOR_JOINT: SCREW_COUPLING_RAD_PER_M * LINEAR_RANGE_CENTER_M,
     },
     joint_vel={".*": 0.0},
 )

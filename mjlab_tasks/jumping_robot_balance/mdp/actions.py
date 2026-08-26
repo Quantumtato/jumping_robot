@@ -116,9 +116,36 @@ class LinearPositionAction(ActionTerm):
     def apply_actions(self) -> None:
         position = self._entity.data.joint_pos[:, self._target_ids]
         velocity = self._entity.data.joint_vel[:, self._target_ids]
+        kp = self.cfg.kp_n_m
+        kd = self.cfg.kd_n_s_m
+        if (
+            self.cfg.jump_kp_n_m is not None
+            and self.cfg.jump_kd_n_s_m is not None
+            and self.cfg.activation_command_name is not None
+        ):
+            # Stiff, lightly damped gains during the jump window only: the
+            # balance-tuned kd absorbs most of the push-off force budget
+            # (v9b diagnostic), while landings (command clears at touchdown)
+            # and stance keep the original soft gains.
+            jump_active = (
+                self._env.command_manager.get_command(
+                    self.cfg.activation_command_name
+                )[:, :1]
+                > 0.5
+            )
+            kp = torch.where(
+                jump_active,
+                torch.full_like(position, self.cfg.jump_kp_n_m),
+                torch.full_like(position, self.cfg.kp_n_m),
+            )
+            kd = torch.where(
+                jump_active,
+                torch.full_like(position, self.cfg.jump_kd_n_s_m),
+                torch.full_like(position, self.cfg.kd_n_s_m),
+            )
         effort = (
-            self.cfg.kp_n_m * (self._position_target - position)
-            - self.cfg.kd_n_s_m * velocity
+            kp * (self._position_target - position)
+            - kd * velocity
         )
         effort = torch.clamp(
             effort,
@@ -148,6 +175,11 @@ class LinearPositionActionCfg(ActionTermCfg):
     kp_n_m: float = LINEAR_POSITION_KP_N_M
     kd_n_s_m: float = LINEAR_POSITION_KD_N_S_M
     max_force_n: float = LINEAR_MAX_FORCE_N
+    # Optional stiffer gains used only while the activation command (jump)
+    # is active; both must be set together. Hardware must gain-schedule the
+    # same way (see HARDWARE_INTERFACE.md).
+    jump_kp_n_m: float | None = None
+    jump_kd_n_s_m: float | None = None
     position_command_name: str | None = None
     activation_command_name: str | None = None
 
@@ -187,6 +219,8 @@ def build_height_action_terms(play: bool = False) -> dict[str, ActionTermCfg]:
 
 def build_jump_stage_one_action_terms(
     gate_with_jump_command: bool = False,
+    jump_kp_n_m: float | None = None,
+    jump_kd_n_s_m: float | None = None,
 ) -> dict[str, ActionTermCfg]:
     terms = build_action_terms()
     terms["linear_position"] = LinearPositionActionCfg(
@@ -197,5 +231,89 @@ def build_jump_stage_one_action_terms(
         activation_command_name=(
             JUMP_COMMAND_NAME if gate_with_jump_command else None
         ),
+        jump_kp_n_m=jump_kp_n_m,
+        jump_kd_n_s_m=jump_kd_n_s_m,
+    )
+    return terms
+
+
+def build_free_hop_action_terms() -> dict[str, ActionTermCfg]:
+    """Three continuous motor actions with full, ungated leg authority."""
+    terms = build_action_terms()
+    terms["linear_position"] = LinearPositionActionCfg(
+        entity_name=ROBOT_ENTITY_NAME,
+        position_scale_schedule=((0, _JUMP_POSITION_RESIDUAL_SCALE_M),),
+        max_target_speed_m_s=_JUMP_TARGET_MAX_SPEED_M_S,
+    )
+    return terms
+
+
+class JumpTriggerAction(ActionTerm):
+    """One-channel action that lets the policy request a jump.
+
+    The request is forwarded to the jump command term, which only honors it
+    when the robot is grounded, no jump is active, and the post-landing
+    cooldown has elapsed.
+    """
+
+    cfg: JumpTriggerActionCfg
+
+    def __init__(self, cfg: JumpTriggerActionCfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._action_dim = 1
+        self._raw_actions = torch.zeros(
+            self.num_envs,
+            self._action_dim,
+            device=self.device,
+        )
+
+    @property
+    def action_dim(self) -> int:
+        return self._action_dim
+
+    @property
+    def raw_action(self) -> torch.Tensor:
+        return self._raw_actions
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        self._raw_actions[:] = actions
+        jump_term = self._env.command_manager.get_term(JUMP_COMMAND_NAME)
+        jump_term.request_jump(
+            actions[:, 0] > self.cfg.trigger_threshold
+        )
+
+    def apply_actions(self) -> None:
+        pass
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self._raw_actions[env_ids] = 0.0
+
+
+@dataclass(kw_only=True)
+class JumpTriggerActionCfg(ActionTermCfg):
+    trigger_threshold: float = 0.5
+
+    def build(self, env: ManagerBasedRlEnv) -> JumpTriggerAction:
+        return JumpTriggerAction(self, env)
+
+
+def build_navigation_action_terms(
+    jump_kp_n_m: float | None = None,
+    jump_kd_n_s_m: float | None = None,
+) -> dict[str, ActionTermCfg]:
+    """Motor actions plus a model-controlled jump trigger channel.
+
+    The trigger term must stay last so motor action indices remain stable
+    for checkpoints and observations that slice the first three channels.
+    """
+    terms = build_jump_stage_one_action_terms(
+        gate_with_jump_command=True,
+        jump_kp_n_m=jump_kp_n_m,
+        jump_kd_n_s_m=jump_kd_n_s_m,
+    )
+    terms["jump_request"] = JumpTriggerActionCfg(
+        entity_name=ROBOT_ENTITY_NAME,
     )
     return terms
