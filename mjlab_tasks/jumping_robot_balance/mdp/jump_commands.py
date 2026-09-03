@@ -118,6 +118,22 @@ class JumpCommand(CommandTerm):
             self.num_envs,
             device=self.device,
         )
+        # v31 progress gates. Hop start waits for the balance phase to
+        # actually converge (fraction of envs tilted past the gate angle,
+        # EMA, below threshold) instead of firing on the clock -- v30
+        # started hops on a policy that was still falling every ~2.5 s.
+        # The scaffold fade waits for the trigger handover to complete,
+        # a healthy self-trigger rate, and an earned speed promotion --
+        # v30 faded on the clock while the ladder was stuck at rung one
+        # and bankrupted the gait.
+        self.hops_enabled_since_step: int | None = None
+        self._balance_upset_ema = 1.0
+        self._fade_start_step: int | None = None
+        # v32 promotion currency: EMA of the per-hop tent fraction (see the
+        # touchdown handler). Starts at 0 (pessimistic); the speed
+        # curriculum reads it through hop_fraction_ema and resets it on
+        # promotion via reset_hop_fraction_ema().
+        self._hop_fraction_ema = 0.0
         self.airborne_time = torch.zeros(self.num_envs, device=self.device)
         self.landing_recovery_time = torch.zeros(
             self.num_envs,
@@ -190,6 +206,18 @@ class JumpCommand(CommandTerm):
         self._auto_trigger_count_this_step = 0
         self._model_trigger_rate_ema = torch.zeros((), device=self.device)
         self._auto_trigger_rate_ema = torch.zeros((), device=self.device)
+        self.metrics["balance_upset_ema"] = torch.zeros(
+            self.num_envs,
+            device=self.device,
+        )
+        self.metrics["hop_fraction_ema"] = torch.zeros(
+            self.num_envs,
+            device=self.device,
+        )
+        self.metrics["scaffold_fade_progress"] = torch.zeros(
+            self.num_envs,
+            device=self.device,
+        )
         self.metrics["model_trigger_rate"] = torch.zeros(
             self.num_envs,
             device=self.device,
@@ -256,13 +284,96 @@ class JumpCommand(CommandTerm):
         """Record a policy-issued jump request; honored on the next update."""
         self._model_jump_request |= request_mask
 
+    def _update_phase_gates(self) -> None:
+        """Latch the hop-start and scaffold-fade progress gates (v31)."""
+        if self.cfg.play or self.cfg.phase_schedule_steps is None:
+            return
+        step = self._env.common_step_counter
+        hop_start_step, _ = self.cfg.phase_schedule_steps
+        if self.hops_enabled_since_step is None:
+            if self.cfg.balance_gate_upset_threshold is None:
+                if step >= hop_start_step:
+                    self.hops_enabled_since_step = step
+            else:
+                upset = (
+                    (
+                        torch.linalg.vector_norm(
+                            self._robot.data.projected_gravity_b[:, :2],
+                            dim=1,
+                        )
+                        > math.sin(
+                            math.radians(self.cfg.balance_gate_tilt_deg)
+                        )
+                    )
+                    .float()
+                    .mean()
+                    .item()
+                )
+                # tau ~2000 policy steps (~60 iterations); starting from the
+                # pessimistic 1.0, the latch needs a few hundred iterations
+                # of consistently upright envs before it can fire.
+                blend = 0.0005
+                self._balance_upset_ema += blend * (
+                    upset - self._balance_upset_ema
+                )
+                ready = (
+                    self._balance_upset_ema
+                    < self.cfg.balance_gate_upset_threshold
+                )
+                overdue = step >= (
+                    hop_start_step + self.cfg.balance_gate_max_delay_steps
+                )
+                if step >= hop_start_step and (ready or overdue):
+                    self.hops_enabled_since_step = step
+                    print(
+                        f"[INFO] Hop phase enabled at step {step} (upset "
+                        f"EMA {self._balance_upset_ema:.4f}"
+                        f"{', fallback latch' if overdue and not ready else ''})."
+                    )
+        if (
+            self.cfg.scaffold_fade_duration_steps is not None
+            and self._fade_start_step is None
+            and self.hops_enabled_since_step is not None
+            and self._trigger_anneal_progress() >= 1.0
+            and float(self._model_trigger_rate_ema)
+            >= self.cfg.scaffold_fade_min_trigger_rate
+        ):
+            planar = self._env.command_manager.get_term(
+                PLANAR_VELOCITY_COMMAND_NAME
+            )
+            if getattr(planar, "_speed_level", 0) >= 1:
+                self._fade_start_step = step
+                print(f"[INFO] Scaffold fade started at step {step}.")
+
+    @property
+    def hop_fraction_ema(self) -> float:
+        """EMA of the achieved fraction of commanded hop distance (v32)."""
+        return self._hop_fraction_ema
+
+    def reset_hop_fraction_ema(self) -> None:
+        """Pessimistic reset after a speed promotion (new command scale)."""
+        self._hop_fraction_ema = 0.0
+
+    @property
+    def scaffold_fade_progress(self) -> float:
+        """0 before the fade latch fires, 1 once scaffolds are fully gone."""
+        if (
+            self.cfg.scaffold_fade_duration_steps is None
+            or self._fade_start_step is None
+        ):
+            return 0.0
+        return min(
+            1.0,
+            (self._env.common_step_counter - self._fade_start_step)
+            / max(1, self.cfg.scaffold_fade_duration_steps),
+        )
+
     def _model_trigger_enabled(self) -> bool:
         if self.cfg.phase_schedule_steps is None:
             return self.cfg.model_triggered
         if self.cfg.play:
             return True
-        hop_start_step, _ = self.cfg.phase_schedule_steps
-        return self._env.common_step_counter >= hop_start_step
+        return self.hops_enabled_since_step is not None
 
     def _trigger_anneal_progress(self) -> float:
         """0 before the anneal starts, 1 when forced triggers are fully off."""
@@ -288,8 +399,10 @@ class JumpCommand(CommandTerm):
             return self.cfg.auto_trigger
         if self.cfg.play:
             return False
-        hop_start_step, model_only_step = self.cfg.phase_schedule_steps
-        return hop_start_step <= self._env.common_step_counter < model_only_step
+        _, model_only_step = self.cfg.phase_schedule_steps
+        if self.hops_enabled_since_step is None:
+            return False
+        return self._env.common_step_counter < model_only_step
 
     @property
     def current_target_height(self) -> float:
@@ -364,6 +477,11 @@ class JumpCommand(CommandTerm):
                 / self._trigger_rate_ema.clamp_min(1.0e-6)
             )
         self.metrics["apex_height"][:] = self.apex_height
+        self.metrics["balance_upset_ema"].fill_(self._balance_upset_ema)
+        self.metrics["hop_fraction_ema"].fill_(self._hop_fraction_ema)
+        self.metrics["scaffold_fade_progress"].fill_(
+            self.scaffold_fade_progress
+        )
         self.metrics["model_trigger_rate"].fill_(
             float(self._model_trigger_rate_ema)
         )
@@ -444,6 +562,7 @@ class JumpCommand(CommandTerm):
             self.time_left[env_ids] = math.inf
 
     def _update_command(self, dt: float) -> None:
+        self._update_phase_gates()
         self.apex_progress_delta.zero_()
         self.landing_event.zero_()
         self.hop_displacement_xy.zero_()
@@ -547,6 +666,34 @@ class JumpCommand(CommandTerm):
         )
         self.hop_period_s[touchdown] = self._time_since_touchdown_s[touchdown]
         self._time_since_touchdown_s[touchdown] = 0.0
+        # v32: EMA of the tent fraction (achieved fraction of the commanded
+        # distance, same quantity the displacement reward pays) over moving
+        # hops. The speed curriculum promotes on this instead of the
+        # hop-averaged vector velocity error: v31 showed the 0.6 relative
+        # velocity gate has never been passed by any lineage (best ratio
+        # ~1.03) because the robot is stationary between ballistic hops,
+        # while per-hop displacement accuracy is directly achievable.
+        if touchdown.any():
+            planar_cmd = self._env.command_manager.get_command(
+                PLANAR_VELOCITY_COMMAND_NAME
+            )[touchdown]
+            cmd_speed = torch.linalg.vector_norm(planar_cmd, dim=1)
+            moving = cmd_speed >= 0.02
+            if moving.any():
+                direction = planar_cmd[moving] / cmd_speed[moving].unsqueeze(1)
+                along = (
+                    self.hop_displacement_xy[touchdown][moving] * direction
+                ).sum(dim=1)
+                commanded = (
+                    cmd_speed[moving] * self.hop_period_s[touchdown][moving]
+                )
+                fraction = (
+                    (commanded - (along - commanded).abs())
+                    / commanded.clamp_min(1.0e-3)
+                ).clamp(-2.0, 1.0)
+                self._hop_fraction_ema += 0.001 * float(
+                    fraction.mean() - self._hop_fraction_ema
+                )
         # Foot touchdown while roughly upright counts as "landed without
         # falling" (a crashed robot lands on its body, not its foot).
         upright_touchdown = touchdown & (
@@ -807,6 +954,19 @@ class JumpCommandCfg(CommandTermCfg):
     # whenever velocity commands keep the robot moving between jumps.
     curriculum_gate_on_landing: bool = False
     curriculum_landing_max_tilt_deg: float = 30.0
+    # v31 hop-start progress gate: when set, forced hops wait (past the
+    # scheduled hop_start_step) until the EMA fraction of envs tilted past
+    # balance_gate_tilt_deg drops below this threshold, i.e. the balance
+    # phase has actually converged. The fallback latch bounds the delay.
+    balance_gate_upset_threshold: float | None = None
+    balance_gate_tilt_deg: float = 30.0
+    balance_gate_max_delay_steps: int = 48_000
+    # v31 scaffold-fade progress gate: when set, the fade starts only after
+    # the trigger handover completes, the model self-trigger EMA clears
+    # scaffold_fade_min_trigger_rate, and the speed ladder has earned its
+    # first promotion; it then runs linearly over this many steps.
+    scaffold_fade_duration_steps: int | None = None
+    scaffold_fade_min_trigger_rate: float = 6.0
 
     def build(self, env: ManagerBasedRlEnv) -> JumpCommand:
         return JumpCommand(self, env)
@@ -826,6 +986,8 @@ def build_jump_commands(
     curriculum_gate_on_landing: bool = False,
     speed_scaled_resampling_range: tuple[float, float] | None = None,
     auto_trigger_anneal_steps: tuple[int, int] | None = None,
+    balance_gate_upset_threshold: float | None = None,
+    scaffold_fade_duration_steps: int | None = None,
 ) -> dict[str, CommandTermCfg]:
     return {
         JUMP_COMMAND_NAME: JumpCommandCfg(
@@ -841,6 +1003,8 @@ def build_jump_commands(
             curriculum_gate_on_landing=curriculum_gate_on_landing,
             speed_scaled_resampling_range=speed_scaled_resampling_range,
             auto_trigger_anneal_steps=auto_trigger_anneal_steps,
+            balance_gate_upset_threshold=balance_gate_upset_threshold,
+            scaffold_fade_duration_steps=scaffold_fade_duration_steps,
             resampling_time_range=(
                 (
                     resampling_time_range

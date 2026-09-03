@@ -211,11 +211,9 @@ def main() -> None:
     elif args.stage == "speed-continue":
         # Speed-ladder continuation of a post-handover direct-pipeline
         # checkpoint; adaptive LR self-tunes from the resumed policy.
-        # v28: zero entropy again. v27 showed the v26 diet still left
-        # hop-count-scaling income (the gated velocity terms), so 2e-4
-        # kept ratcheting the std (0.25 -> 0.62). Diet 2.0 removes that
-        # income; exploration comes from the checkpoint's clamped std.
-        cfg.agent.algorithm.entropy_coef = 0.0
+        # v35 (v22 replica): default entropy (0.001) and default adaptive
+        # LR, exactly as v22's saved agent.yaml records. The diet-era zero
+        # entropy (v28) was an anti-ratchet measure v22 never used.
         cfg.agent.run_name = "speed_continue"
     elif args.stage == "annealed-pipeline":
         # v29: from scratch with the scaffold-reward fade. Default adaptive

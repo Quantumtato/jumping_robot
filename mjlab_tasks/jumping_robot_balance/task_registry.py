@@ -9,6 +9,7 @@ from mjlab_tasks.jumping_robot_balance.rl.ppo_cfg import (
     jumping_robot_balance_ppo_runner_cfg,
 )
 from mjlab_tasks.jumping_robot_balance.rl.stage_transition_runner import (
+    AnnealedPipelineRunner,
     JumpStageTwoRunner,
     JumpWarmStartRunner,
     NavigationWarmStartRunner,
@@ -204,6 +205,9 @@ def register_tasks() -> None:
                 annealed_pipeline=True,
             ),
             rl_cfg=jumping_robot_balance_ppo_runner_cfg(),
+            # v32: default entropy through balance/hops, cut to 2e-4 once
+            # the handover completes (see AnnealedPipelineRunner).
+            runner_cls=AnnealedPipelineRunner,
         )
     if FREE_HOP_VELOCITY_TASK_ID not in registered:
         register_mjlab_task(

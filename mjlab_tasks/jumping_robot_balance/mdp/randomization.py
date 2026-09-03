@@ -341,6 +341,7 @@ def scheduled_push_by_setting_velocity(
     ramp_start_step: int,
     ramp_end_step: int,
     ramp_final_scale: float,
+    gate_on_scaffold_fade: bool = False,
 ) -> None:
     """Push with pipeline-phase-scheduled strength (v19).
 
@@ -348,9 +349,35 @@ def scheduled_push_by_setting_velocity(
     and velocity tracking are first learned (a 0.25 m/s shove is 2.5x the
     initial command cap and drowns the displacement gradient), then linearly
     ramped back in late for deployment robustness.
+
+    v32: with gate_on_scaffold_fade, the return ramp anchors on the jump
+    term's scaffold-fade COMPLETION instead of the wall clock -- v31's
+    clock-scheduled ramp fired into a run that had not promoted and
+    destroyed its tracking plateau (error 0.139 -> 0.173, std 0.36 ->
+    0.61). If the fade never happens, pushes never return; robustness
+    training is deferred to a continuation rather than sacrificing the
+    skill curriculum. The ramp duration is taken from
+    ramp_end_step - ramp_start_step.
     """
     step = env.common_step_counter
-    if step < off_step:
+    if gate_on_scaffold_fade:
+        jump = env.command_manager.get_term("jump")
+        fade_start = getattr(jump, "_fade_start_step", None)
+        fade_duration = (
+            getattr(jump.cfg, "scaffold_fade_duration_steps", None) or 0
+        )
+        if step < off_step:
+            scale = 1.0
+        elif fade_start is None or step < fade_start + fade_duration:
+            scale = 0.0
+        else:
+            anchor = fade_start + fade_duration
+            progress = min(
+                1.0,
+                (step - anchor) / max(1, ramp_end_step - ramp_start_step),
+            )
+            scale = ramp_final_scale * progress
+    elif step < off_step:
         scale = 1.0
     elif step < ramp_start_step:
         scale = 0.0
@@ -373,8 +400,65 @@ def scheduled_push_by_setting_velocity(
     )
 
 
+@requires_model_fields("geom_friction")
+def randomize_foot_friction(
+    env,
+    env_ids: torch.Tensor | None,
+    sliding_scale_range: tuple[float, float] = (0.6, 1.4),
+    torsional_scale_range: tuple[float, float] = (0.5, 1.5),
+) -> None:
+    """Scale foot geom friction per environment (v39 hardware prep).
+
+    Training so far ran on one fixed friction value; real floors (concrete,
+    hardwood, rubber mat) vary widely, and torsional friction is the only
+    thing anchoring yaw during stance. Sliding and torsional coefficients
+    are scaled independently so the policy can't infer one from the other.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+
+    from mjlab_tasks.jumping_robot_balance.mdp.contact import _contact_ids
+
+    _, foot_body_id = _contact_ids(env)
+    mj_model = env.sim.mj_model
+    foot_geom_ids = torch.tensor(
+        [
+            geom_id
+            for geom_id in range(mj_model.ngeom)
+            if int(mj_model.geom_bodyid[geom_id]) == foot_body_id
+        ],
+        device=env.device,
+        dtype=torch.long,
+    )
+    if foot_geom_ids.numel() == 0:
+        raise ValueError("The robot foot body has no collision geometries.")
+
+    default_friction = env.sim.get_default_field("geom_friction")
+    friction = (
+        default_friction[foot_geom_ids]
+        .unsqueeze(0)
+        .repeat(len(env_ids), 1, 1)
+        .clone()
+    )
+    friction[:, :, 0] *= sample_uniform(
+        sliding_scale_range[0],
+        sliding_scale_range[1],
+        (len(env_ids), 1),
+        device=env.device,
+    )
+    friction[:, :, 1] *= sample_uniform(
+        torsional_scale_range[0],
+        torsional_scale_range[1],
+        (len(env_ids), 1),
+        device=env.device,
+    )
+    env.sim.model.geom_friction[env_ids[:, None], foot_geom_ids] = friction
+
+
 def build_strong_robustness_events(
     push_scale_schedule: tuple[int, int, int, float] | None = None,
+    push_gate_on_scaffold_fade: bool = False,
+    foot_friction_randomization: bool = False,
 ) -> dict[str, EventTermCfg]:
     """Build full-stroke perturbations for the second balance robustness pass."""
     events = build_height_robustness_events(
@@ -414,6 +498,15 @@ def build_strong_robustness_events(
             "bias_range": (-0.0005, 0.0005),
         },
     )
+    if foot_friction_randomization:
+        events["foot_friction"] = EventTermCfg(
+            func=randomize_foot_friction,
+            mode="startup",
+            params={
+                "sliding_scale_range": (0.6, 1.4),
+                "torsional_scale_range": (0.5, 1.5),
+            },
+        )
     if push_scale_schedule is not None:
         off_step, ramp_start_step, ramp_end_step, final_scale = (
             push_scale_schedule
@@ -429,6 +522,7 @@ def build_strong_robustness_events(
                 "ramp_start_step": ramp_start_step,
                 "ramp_end_step": ramp_end_step,
                 "ramp_final_scale": final_scale,
+                "gate_on_scaffold_fade": push_gate_on_scaffold_fade,
             },
         )
     return events

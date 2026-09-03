@@ -7,6 +7,42 @@ import torch
 from mjlab.rl.runner import MjlabOnPolicyRunner
 
 
+class AnnealedPipelineRunner(MjlabOnPolicyRunner):
+    """Cold-start runner with a post-handover entropy cut (v32).
+
+    Default entropy is kept through balance/hop learning (a cold start
+    needs real exploration), then cut once the forced-trigger handover
+    completes at iteration 7,000. v31 showed default entropy is harmless
+    while income is tracking-linked and stable, but it funded the std
+    ratchet (0.36 -> 0.61) once pushes degraded advantages late in the
+    run; 2e-4 matches what stabilized the warm lineage (v23b).
+    """
+
+    ENTROPY_CUT_ITERATION = 7_000
+    ENTROPY_COEF_AFTER_CUT = 2.0e-4
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        original_update = self.alg.update
+        self._entropy_update_count = 0
+
+        def update_with_entropy_schedule(*update_args, **update_kwargs):
+            self._entropy_update_count += 1
+            if (
+                self._entropy_update_count >= self.ENTROPY_CUT_ITERATION
+                and self.alg.entropy_coef != self.ENTROPY_COEF_AFTER_CUT
+            ):
+                self.alg.entropy_coef = self.ENTROPY_COEF_AFTER_CUT
+                print(
+                    "[INFO] Entropy coefficient cut to "
+                    f"{self.ENTROPY_COEF_AFTER_CUT} at iteration "
+                    f"{self._entropy_update_count} (post-handover)."
+                )
+            return original_update(*update_args, **update_kwargs)
+
+        self.alg.update = update_with_entropy_schedule
+
+
 class JumpStageTwoRunner(MjlabOnPolicyRunner):
     """Warm-start Stage 2 while zero-initializing its new command inputs."""
 
@@ -190,11 +226,10 @@ class SpeedContinueRunner(PipelineContinueRunner):
     the load clamp so the optimizer retains some slack.
     """
 
-    # v28: load clamp keeps the resume out of the sloppy-hopping noise zone
-    # (v27 ended at 0.62); the per-update ceiling is deliberately OFF as the
-    # honest test of diet 2.0 -- with all hop-count-scaling income removed,
-    # the std should have nothing left to climb on.
-    MAX_LOAD_STD = 0.40
+    # v35 (v22 replica from v34): both clamps OFF. v22 itself ran with the
+    # checkpoint's std untouched and default entropy; the clamps were
+    # diet-era (v24-v28) responses to the std ratchet that v22 never had.
+    MAX_LOAD_STD = None
     MAX_RUN_STD = None
 
     def load(
@@ -216,10 +251,11 @@ class SpeedContinueRunner(PipelineContinueRunner):
                 f"actor {source_actor_dim}/{target_actor_dim}, "
                 f"critic {source_critic_dim}/{target_critic_dim}."
             )
-        loaded["actor_state_dict"]["distribution.std_param"] = torch.clamp(
-            loaded["actor_state_dict"]["distribution.std_param"],
-            max=self.MAX_LOAD_STD,
-        )
+        if self.MAX_LOAD_STD is not None:
+            loaded["actor_state_dict"]["distribution.std_param"] = torch.clamp(
+                loaded["actor_state_dict"]["distribution.std_param"],
+                max=self.MAX_LOAD_STD,
+            )
         self.alg.load(
             loaded,
             {

@@ -196,6 +196,17 @@ class PlanarVelocityCommand(CommandTerm):
             device=self.device,
         )
         self.grounded_foot_height = foot_height_w(env).clone()
+        # v39: seconds since this env's command last changed. Used to mask
+        # the settled tracking metric -- the fleet-mean error is dominated
+        # by post-resample transients (the 1 s velocity EMA plus physical
+        # turnaround eat ~2.5 s after every 4-8 s hot swap), which made
+        # average_velocity_error look terrible while steady-state tracking
+        # was fine in the viewer.
+        self._command_age_s = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["settled_velocity_error"] = torch.zeros(
+            self.num_envs,
+            device=self.device,
+        )
         self.metrics["command_speed"] = torch.zeros(
             self.num_envs,
             device=self.device,
@@ -251,7 +262,30 @@ class PlanarVelocityCommand(CommandTerm):
     def compute(self, dt: float) -> None:
         self._update_imu_and_average(dt)
         self._update_speed_curriculum(dt)
+        self._command_age_s += dt
         super().compute(dt)
+
+    def _commands_live(self) -> bool:
+        """Whether sampled velocity commands are active yet (v31).
+
+        With command_start_follows_jump_offset_steps set, command start is
+        slaved to the jump term's hop-start latch (which is itself
+        progress-gated on balance convergence) plus a fixed offset, so a
+        slow balance phase delays commands along with hops instead of
+        issuing commands to a robot that cannot hop yet.
+        """
+        offset = self.cfg.command_start_follows_jump_offset_steps
+        if offset is not None:
+            # Literal name avoids a circular import with jump_commands.
+            jump = self._env.command_manager.get_term("jump")
+            enabled = getattr(jump, "hops_enabled_since_step", None)
+            return (
+                enabled is not None
+                and self._env.common_step_counter >= enabled + offset
+            )
+        if self.cfg.command_start_step is None:
+            return True
+        return self._env.common_step_counter >= self.cfg.command_start_step
 
     def _speed_gate_threshold_m_s(self) -> float:
         """Error the moving-env EMA must beat before the cap advances.
@@ -279,10 +313,7 @@ class PlanarVelocityCommand(CommandTerm):
         # commands zeroed before command_start_step, tracking error is ~0 and
         # the gate would promote on pure dwell time (v19 reached the 0.25 cap
         # during the balance phase without ever tracking a command).
-        if (
-            self.cfg.command_start_step is not None
-            and self._env.common_step_counter < self.cfg.command_start_step
-        ):
+        if not self._commands_live():
             return
         moving = (
             torch.linalg.vector_norm(self._command, dim=1) > 0.01
@@ -308,8 +339,22 @@ class PlanarVelocityCommand(CommandTerm):
             self._speed_level >= len(caps) - 1
             or self._speed_level_time_s
             < self.cfg.speed_curriculum_min_level_time_s
-            or self._tracking_error_ema > self._speed_gate_threshold_m_s()
         ):
+            return
+        if self.cfg.speed_gate_hop_fraction_threshold is not None:
+            # v32: promote on per-hop displacement accuracy (the jump term's
+            # tent-fraction EMA) instead of hop-averaged vector velocity
+            # error. v31 showed the 0.6 relative velocity gate has never
+            # been passed by any lineage (best ratio ~1.03, vs 0.6 needed)
+            # because a hopper is stationary between ballistic hops; the
+            # fraction gate measures exactly the skill the displacement
+            # reward pays and has a known achievable scale.
+            jump = self._env.command_manager.get_term("jump")
+            fraction = float(getattr(jump, "hop_fraction_ema", 0.0))
+            if fraction < self.cfg.speed_gate_hop_fraction_threshold:
+                return
+            jump.reset_hop_fraction_ema()
+        elif self._tracking_error_ema > self._speed_gate_threshold_m_s():
             return
         self._speed_level += 1
         self._speed_level_time_s = 0.0
@@ -363,9 +408,19 @@ class PlanarVelocityCommand(CommandTerm):
             measured_velocity - self._command,
             dim=1,
         )
-        self.metrics["average_velocity_error"][:] = torch.linalg.vector_norm(
+        average_error = torch.linalg.vector_norm(
             self.average_planar_velocity - self._command,
             dim=1,
+        )
+        self.metrics["average_velocity_error"][:] = average_error
+        # v39: steady-state tracking only -- moving commands older than the
+        # transient window. Broadcast the masked mean so the logger's
+        # fleet-average equals the settled-envs average.
+        settled = (self._command_age_s > 2.5) & (
+            self.metrics["command_speed"] > 0.01
+        )
+        self.metrics["settled_velocity_error"][:] = (
+            average_error[settled].mean() if settled.any() else 0.0
         )
         self.metrics["takeoff"][:] = self.takeoff_event
         self.metrics["touchdown"][:] = self.touchdown_event
@@ -379,6 +434,7 @@ class PlanarVelocityCommand(CommandTerm):
     def _resample_command(self, env_ids: torch.Tensor) -> None:
         # Robot state can still be NaN while the reset pipeline runs, so
         # sanitize here; the per-step update rewrites everything next step.
+        self._command_age_s[env_ids] = 0.0
         velocity = torch.nan_to_num(
             self._robot.data.root_link_lin_vel_w[env_ids]
         )
@@ -389,10 +445,7 @@ class PlanarVelocityCommand(CommandTerm):
             # v14 player fix: episode resets must not wipe knob input. The
             # command buffer already holds whatever the GUI last requested.
             return
-        if (
-            self.cfg.command_start_step is not None
-            and self._env.common_step_counter < self.cfg.command_start_step
-        ):
+        if not self._commands_live():
             # Earlier pipeline phases train balance and hopping in place.
             self._command[env_ids] = 0.0
             return
@@ -528,9 +581,22 @@ class PlanarVelocityCommandCfg(CommandTermCfg):
     speed_curriculum_relative_threshold: float | None = None
     # v17: absolute floor for the relative promotion threshold, so it can
     # never shrink below the hop-cycle noise floor at low command caps.
+    # v33 restore to 0.08: v30 lowered it to 0.04 to block "fake" promotions
+    # off the 0.05 rung, but the v21b lineage's easy first promotion was
+    # part of the working recipe -- it moved learning to rungs where the
+    # dense displacement income actually differentiates aim, instead of
+    # stranding the run at a rung where the command is below sensor noise.
     speed_curriculum_error_floor_m_s: float = 0.08
     speed_curriculum_ema_tau_s: float = 30.0
     speed_curriculum_min_level_time_s: float = 60.0
+    # v31: when set, command start = jump term hop-start latch + offset,
+    # keeping the balance->hops->commands ordering under progress-gated
+    # phases. Takes precedence over command_start_step.
+    command_start_follows_jump_offset_steps: int | None = None
+    # v32: when set, promotions require the jump term's hop-fraction EMA
+    # (achieved fraction of commanded hop distance) to clear this value,
+    # replacing the velocity-error gate. See _update_speed_curriculum.
+    speed_gate_hop_fraction_threshold: float | None = None
 
     def build(self, env: ManagerBasedRlEnv) -> PlanarVelocityCommand:
         return PlanarVelocityCommand(self, env)
@@ -544,6 +610,8 @@ def build_planar_velocity_commands(
     stationary_probability: float = 0.35,
     max_speed_m_s: float = PLANAR_VELOCITY_SCALE_M_S,
     apply_only_when_grounded: bool = False,
+    command_start_follows_jump_offset_steps: int | None = None,
+    speed_gate_hop_fraction_threshold: float | None = None,
 ) -> dict[str, CommandTermCfg]:
     return {
         PLANAR_VELOCITY_COMMAND_NAME: PlanarVelocityCommandCfg(
@@ -551,6 +619,12 @@ def build_planar_velocity_commands(
             max_speed_m_s=max_speed_m_s,
             resampling_time_range=(1.0e9, 1.0e9) if play else (3.0, 6.0),
             command_start_step=command_start_step,
+            command_start_follows_jump_offset_steps=(
+                command_start_follows_jump_offset_steps
+            ),
+            speed_gate_hop_fraction_threshold=(
+                speed_gate_hop_fraction_threshold
+            ),
             speed_curriculum_caps=speed_curriculum_caps,
             speed_curriculum_relative_threshold=speed_curriculum_relative_threshold,
             stationary_probability=stationary_probability,

@@ -14,6 +14,162 @@ def _add_repo_root_to_pythonpath() -> None:
         sys.path.insert(0, repo_root_str)
 
 
+def _install_multirun_checkpoint_browser(checkpoint_file: str) -> None:
+    """Add a Run dropdown next to the viewer's Checkpoint dropdown.
+
+    mjlab's local CheckpointManager only lists *.pt files in the loaded
+    checkpoint's own directory. This wraps ViserPlayViewer with a "Run"
+    dropdown (inserted just above the existing "Checkpoint" dropdown in the
+    Checkpoints tab). Picking a run repopulates the checkpoint dropdown with
+    that run's checkpoints and hot-swaps to its latest one. Runs from older
+    lineages with a different observation space fail to load safely: the
+    previous policy keeps running and the Run dropdown snaps back.
+    """
+    import time as _time
+
+    import mjlab.scripts.play as _mjplay
+    from mjlab.viewer.base import ViewerAction
+    from mjlab.viewer.viser.viewer import format_time_ago
+
+    resume_path = Path(checkpoint_file).resolve()
+    runs_root = resume_path.parent.parent
+    base_viewer = _mjplay.ViserPlayViewer
+    state = {"run": resume_path.parent.name}
+
+    def _step_of(f: Path) -> int:
+        try:
+            return int(f.stem.split("_")[1])
+        except (IndexError, ValueError):
+            return 0
+
+    def _list_runs() -> list[str]:
+        runs = sorted(
+            d.name
+            for d in runs_root.iterdir()
+            if d.is_dir() and next(d.glob("model_*.pt"), None) is not None
+        )[-30:]
+        if state["run"] not in runs:
+            runs.append(state["run"])
+        return runs
+
+    class _MultiRunViserViewer(base_viewer):  # type: ignore[misc,valid-type]
+        def __init__(self, env, policy, checkpoint_manager=None):
+            self._run_dropdown = None
+            self._run_guard = False
+            mgr = checkpoint_manager
+            if mgr is not None:
+                orig_load = mgr.load_checkpoint
+
+                def fetch_available() -> list[tuple[str, str]]:
+                    now = _time.time()
+                    self._refresh_run_options()
+                    models = sorted(
+                        (runs_root / state["run"]).glob("model_*.pt"),
+                        key=_step_of,
+                    )
+                    return [
+                        (f.name, format_time_ago(int(now - f.stat().st_mtime)))
+                        for f in models
+                    ]
+
+                def load_checkpoint(name: str):
+                    # Manager's original loader resolves relative to the
+                    # resume checkpoint's directory; hop up to the run root.
+                    previous_run = getattr(mgr, "_loaded_run", state["run"])
+                    previous_name = getattr(
+                        mgr, "_loaded_name", resume_path.name
+                    )
+                    try:
+                        policy = orig_load(f"../{state['run']}/{name}")
+                        mgr._loaded_run = state["run"]
+                        mgr._loaded_name = name
+                        return policy
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            f"[WARN] Could not load {state['run']}/{name} "
+                            f"({exc}); keeping the current policy. Runs from "
+                            "older lineages may have a different observation "
+                            "space."
+                        )
+                        state["run"] = previous_run
+                        self._set_run_dropdown(previous_run)
+                        mgr.current_name = previous_name
+                        return orig_load(
+                            f"../{previous_run}/{previous_name}"
+                        )
+
+                mgr._loaded_run = state["run"]
+                mgr._loaded_name = resume_path.name
+                mgr.fetch_available = fetch_available
+                mgr.load_checkpoint = load_checkpoint
+            super().__init__(env, policy, checkpoint_manager=mgr)
+
+        def _set_run_dropdown(self, run_name: str) -> None:
+            if self._run_dropdown is None:
+                return
+            self._run_guard = True
+            try:
+                if run_name not in self._run_dropdown.options:
+                    self._run_dropdown.options = (
+                        *self._run_dropdown.options,
+                        run_name,
+                    )
+                self._run_dropdown.value = run_name
+            finally:
+                self._run_guard = False
+
+        def _refresh_run_options(self) -> None:
+            if self._run_dropdown is None:
+                return
+            runs = _list_runs()
+            if list(self._run_dropdown.options) != runs:
+                self._run_guard = True
+                try:
+                    self._run_dropdown.options = runs
+                    self._run_dropdown.value = state["run"]
+                finally:
+                    self._run_guard = False
+
+        def setup(self) -> None:
+            # Intercept creation of the "Checkpoint" dropdown so the "Run"
+            # dropdown lands directly above it, inside the same tab.
+            gui = self._server.gui
+            orig_add_dropdown = gui.add_dropdown
+
+            def add_dropdown(label, *args, **kwargs):
+                if label == "Checkpoint" and self._run_dropdown is None:
+                    runs = _list_runs()
+                    self._run_dropdown = orig_add_dropdown(
+                        "Run", options=runs, initial_value=state["run"]
+                    )
+
+                    @self._run_dropdown.on_update
+                    def _(_) -> None:
+                        if self._run_guard:
+                            return
+                        selected = self._run_dropdown.value
+                        if selected != state["run"]:
+                            state["run"] = selected
+                            # Checkpoint names repeat across runs (e.g.
+                            # model_1000.pt); blank current_name so the
+                            # viewer's same-name check can't skip the load.
+                            if self._ckpt_mgr is not None:
+                                self._ckpt_mgr.current_name = ""
+                            self._actions.append(
+                                (ViewerAction.FETCH_CHECKPOINT, "latest")
+                            )
+
+                return orig_add_dropdown(label, *args, **kwargs)
+
+            gui.add_dropdown = add_dropdown
+            try:
+                super().setup()
+            finally:
+                del gui.add_dropdown
+
+    _mjplay.ViserPlayViewer = _MultiRunViserViewer
+
+
 def main() -> None:
     _add_repo_root_to_pythonpath()
 
@@ -162,6 +318,9 @@ def main() -> None:
         task_id = HEIGHT_TASK_ID
     else:
         task_id = TASK_ID
+
+    if args.checkpoint_file and args.agent == "trained":
+        _install_multirun_checkpoint_browser(args.checkpoint_file)
 
     if args.viewer_stride > 1:
         print(

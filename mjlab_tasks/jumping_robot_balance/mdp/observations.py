@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING
 
 import torch
@@ -282,6 +283,7 @@ def build_observation_groups(
     sensor_noise: bool = False,
     navigation: bool = False,
     actor_velocity_estimate: bool = False,
+    sensor_latency: bool = False,
 ) -> dict[str, ObservationGroupCfg]:
     actor_terms = {
         "projected_gravity": ObservationTermCfg(
@@ -399,6 +401,35 @@ def build_observation_groups(
                 else None
             ),
         )
+
+    if sensor_latency:
+        # v40 hardware prep: sensor readings arrive 0-2 control steps late
+        # (0-20 ms at 100 Hz), covering IMU filter group delay, CAN bus
+        # transport, and the control loop's read-compute-write phase. Lag is
+        # sampled per env and per term (real sensors have independent
+        # latencies) with a high hold probability so it drifts slowly
+        # instead of jittering every step. Policy-side quantities -- the
+        # commands the policy itself receives and its own last action --
+        # are never late, so they stay undelayed. dataclasses.replace makes
+        # actor-only copies: critic_terms shares the underlying cfg objects
+        # and the critic's privileged view should stay instantaneous.
+        policy_side_terms = {
+            "last_action",
+            "height_command",
+            "linear_position_target",
+            "jump_command",
+            "planar_velocity_command",
+        }
+        for name in list(actor_terms):
+            if name in policy_side_terms:
+                continue
+            actor_terms[name] = dataclasses.replace(
+                actor_terms[name],
+                delay_min_lag=0,
+                delay_max_lag=2,
+                delay_per_env=True,
+                delay_hold_prob=0.9,
+            )
 
     return {
         "actor": ObservationGroupCfg(

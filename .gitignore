@@ -22,3 +22,4 @@ system_identification_results/
 logs/
 wandb/
 MUJOCO_LOG.TXT
+nohup.out

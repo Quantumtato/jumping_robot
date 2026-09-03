@@ -65,6 +65,43 @@ def upright_stability(
     return torch.exp(-horizontal_gravity_l2 / width)
 
 
+def stance_upright_stability(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _ROBOT_CFG,
+    moving_width_deg: float = 25.0,
+    moving_speed_threshold_m_s: float = 0.02,
+) -> torch.Tensor:
+    """Upright income with a widened tolerance while a velocity is commanded.
+
+    v30: the balance-era bonus uses a 10 deg Gaussian width, so at the
+    ~10-15 deg lean used to aim takeoffs the income is already mostly gone
+    -- we relaxed the tilt *penalty* while moving (stance_tilt_error_l2,
+    v12) but kept paying full strength for standing vertical, which
+    competes with the lean-into-command that displacement income needs.
+    Widening the width to 25 deg while moving makes aiming lean free while
+    preserving the recovery gradient at large tilt and the full-sharpness
+    stand-still incentive at ~zero command.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    horizontal_gravity_l2 = torch.sum(
+        torch.square(asset.data.projected_gravity_b[:, :2]),
+        dim=1,
+    )
+    command_speed = torch.linalg.vector_norm(
+        env.command_manager.get_command(PLANAR_VELOCITY_COMMAND_NAME),
+        dim=1,
+    )
+    moving = command_speed >= moving_speed_threshold_m_s
+    stationary_width = math.sin(math.radians(10.0)) ** 2
+    moving_width = math.sin(math.radians(moving_width_deg)) ** 2
+    width = torch.where(
+        moving,
+        torch.full_like(horizontal_gravity_l2, moving_width),
+        torch.full_like(horizontal_gravity_l2, stationary_width),
+    )
+    return torch.exp(-horizontal_gravity_l2 / width)
+
+
 def tilt_error_l2(
     env: "ManagerBasedRlEnv",
     asset_cfg: SceneEntityCfg = _ROBOT_CFG,
@@ -427,27 +464,54 @@ def instantaneous_overspeed(
 def _velocity_income_gate(
     env: "ManagerBasedRlEnv",
     gate_s: float = 2.0,
+    stationary_threshold_m_s: float = 0.02,
 ) -> torch.Tensor:
-    """1.0 while a jump is active or ended within ``gate_s`` seconds (v14).
+    """1 while the robot hops (or has no movement command), else 0.
 
-    Velocity rewards only pay near jump activity, so continuous hopping is
-    the only way to keep the tracking income flowing; standing (or scooting)
-    while drifting toward the command earns nothing.
+    v36 restore: verbatim semantics of the pre-incident v14
+    ``_jump_recency_gate``, recovered from the Aug 20 transcript snapshot.
+    The original docstring: "Standing still at zero command stays fully
+    paid." The Aug 25 incident reconstruction dropped the stationary
+    clause, so a zero-command env earned nothing while standing and the
+    only way to open the tracking income was to jump. That deleted the
+    zero-risk income stream that funds pruning the trigger channel, so
+    every post-incident cold start (v33/v34) churn-hopped from hop start,
+    never consolidated balance, and never reached episode timeouts until
+    the very end -- unlike v21b, which pruned by iteration ~2,200 and
+    stabilized under the forced cadence.
     """
     jump = _jump_term(env)
-    recently_jumped = (jump.time_since_jump_end <= gate_s).float()
-    return torch.clamp(_jump_active(env) + recently_jumped, max=1.0)
+    planar = _planar_velocity_term(env)
+    hopping = (jump.command[:, 0] > 0.5) | (
+        jump.time_since_jump_end < gate_s
+    )
+    stationary = (
+        torch.linalg.vector_norm(planar.command, dim=1)
+        < stationary_threshold_m_s
+    )
+    return (hopping | stationary).float()
 
 
 def gated_hop_averaged_velocity_tracking(
     env: "ManagerBasedRlEnv",
     gate_s: float = 2.0,
 ) -> torch.Tensor:
-    """Hop-averaged tracking kernel, paid only near jump activity (v14)."""
-    return hop_averaged_velocity_tracking(env) * _velocity_income_gate(
-        env,
-        gate_s,
+    """Absolute hop-averaged tracking kernel, paid near jump activity.
+
+    v14 income gating with the v21-era absolute Gaussian kernel (sigma
+    0.2 m/s). v33 restore: the v30 command-relative kernel was designed
+    to stop standing-still from earning under low commands, but it also
+    deleted the partial credit that teaches a cold start to aim -- the
+    dense staircase from "hop randomly" to "hop along command" is exactly
+    what noise-driven exploration climbs. The v21b lineage (the only one
+    whose deterministic policy ever steered) learned on this form.
+    """
+    term = _planar_velocity_term(env)
+    error_l2 = torch.sum(
+        torch.square(term.average_planar_velocity - term.command),
+        dim=1,
     )
+    return torch.exp(-error_l2 / 0.04) * _velocity_income_gate(env, gate_s)
 
 
 def gated_hop_averaged_directional_progress(
@@ -465,11 +529,15 @@ def gated_instantaneous_velocity_tracking(
     env: "ManagerBasedRlEnv",
     gate_s: float = 2.0,
 ) -> torch.Tensor:
-    """Instantaneous tracking kernel, paid only near jump activity (v14)."""
-    return instantaneous_velocity_tracking(env) * _velocity_income_gate(
-        env,
-        gate_s,
-    )
+    """Absolute instantaneous tracking kernel, paid near jump activity.
+
+    v14 income gating, v21-era absolute Gaussian kernel (v33 restore --
+    see gated_hop_averaged_velocity_tracking).
+    """
+    term = _planar_velocity_term(env)
+    velocity = term._robot.data.root_link_lin_vel_w[:, :2]
+    error_l2 = torch.sum(torch.square(velocity - term.command), dim=1)
+    return torch.exp(-error_l2 / 0.04) * _velocity_income_gate(env, gate_s)
 
 
 def takeoff_velocity_along_command(
@@ -490,6 +558,10 @@ def takeoff_velocity_along_command(
     command_speed = torch.linalg.vector_norm(command, dim=1)
     direction = command / command_speed.clamp_min(1.0e-6).unsqueeze(1)
     along = (velocity * direction).sum(dim=1)
+    # v33 restore: uncapped, as in the v21b lineage. The v30 cap targeted
+    # v29's noise-funded frantic hopping, but the real fix was recognizing
+    # the noise itself (deterministic eval); the uncapped signed payout is
+    # part of the dense gradient that teaches committed, aimed takeoffs.
     moving = (command_speed >= min_command_speed_m_s).float()
     return jump.takeoff_event * along * moving
 
@@ -530,20 +602,15 @@ def hop_displacement_along_command(
     command_speed = torch.linalg.vector_norm(command, dim=1)
     direction = command / command_speed.clamp_min(1.0e-6).unsqueeze(1)
     along = (jump.hop_displacement_xy * direction).sum(dim=1)
-    # v24 capped the payout at the commanded distance (speed x
-    # touchdown-to-touchdown period) so overshoot couldn't out-earn
-    # accuracy. v28 exposed the flaw: min(realized, commanded) pays
-    # overshoot at the SAME rate as a perfect hop, so once the policy
-    # learned to always over-jump, income saturated and became insensitive
-    # to precision -- 40 frantic hops/episode at 2x the commanded speed
-    # earned the full cap while the action std ratcheted 0.31 -> 1.21.
-    # v29: tent-shaped payout peaked exactly at the commanded distance.
-    # A perfect hop earns the commanded distance; overshoot bleeds at the
-    # same rate as undershoot; hops against the command go negative. This
-    # also closes the hop-frequency channel: once realized displacement
-    # matches the command, extra hops are overshoot and lose money.
-    commanded_distance = command_speed * jump.hop_period_s
-    along = commanded_distance - (along - commanded_distance).abs()
+    # v33 restore: raw signed meters along the command, the v18/v21b form.
+    # The v24 cap, v29 tent, and v31 normalization each made this payout
+    # harder for noise to farm -- and each also removed partial credit a
+    # cold start needs (an unaimed hop that drifts the right way must earn
+    # MORE than one that doesn't, or there is no aim gradient). The v21b
+    # lineage, the only one whose deterministic policy ever steered,
+    # learned on this form; the noise-farming it permits is handled
+    # mechanically (std clamp in continuation stages) and watched by the
+    # deterministic eval battery instead of priced into the reward.
     moving = (command_speed >= min_command_speed_m_s).float()
     return jump.landing_event * along * moving
 
@@ -553,7 +620,11 @@ def hop_displacement_perpendicular_l1(
     min_command_speed_m_s: float = 0.02,
 ) -> torch.Tensor:
     """Takeoff-to-touchdown planar displacement perpendicular to the
-    command, per touchdown (aim-tightening cost for the v18 payout)."""
+    command, per touchdown (aim-tightening cost for the v18 payout).
+
+    v33 restore: raw meters, the v18/v21b form (the v31 normalization is
+    retired along with the tent income).
+    """
     jump = _jump_term(env)
     planar = _planar_velocity_term(env)
     command = planar.command
@@ -584,19 +655,27 @@ def apex_overshoot(
     env: "ManagerBasedRlEnv",
     margin_m: float = 0.05,
 ) -> torch.Tensor:
-    """Apex growth beyond the curriculum target plus a margin (v16).
+    """Apex above target+margin, charged once per jump at touchdown.
 
-    Charged as the per-step increase of the overshoot (mirror of the apex
-    progress idiom), so each hop pays proportionally to how far past
-    target + margin it flew. Keeps the takeoff-impulse income from being
-    farmed with ever-taller vertical launches.
+    v15 showed the 0.32 m apex persists against a 0.15 target when
+    overshooting is free (the dwell cap only stops paying, it never
+    charges). Linear above the margin; reaching the target itself is
+    never discouraged.
+
+    v34 restore: this is the ORIGINAL v16 body, recovered verbatim from
+    the v16 build-session transcript. The Aug 25 incident reconstruction
+    guessed a per-step delta form instead -- same magnitude per hop, but
+    charged during ascent, which pins an anti-jump gradient directly on
+    the takeoff action. Every post-incident cold start (v29-v33) failed
+    to sustain self-triggered hopping under that form; v21b learned under
+    this one, where the charge lands diluted at touchdown.
     """
-    term = _jump_term(env)
-    threshold = term.current_target_height + margin_m
-    previous_apex = term.apex_height - term.apex_progress_delta
-    overshoot_now = torch.clamp(term.apex_height - threshold, min=0.0)
-    overshoot_prev = torch.clamp(previous_apex - threshold, min=0.0)
-    return torch.clamp(overshoot_now - overshoot_prev, min=0.0)
+    jump = _jump_term(env)
+    over = torch.clamp(
+        jump.apex_height - (jump.current_target_height + margin_m),
+        min=0.0,
+    )
+    return jump.landing_event * over
 
 
 def free_hop_clearance(
@@ -712,28 +791,24 @@ def fell_over(
 def annealed_reward(
     env: "ManagerBasedRlEnv",
     term_func,
-    anneal_start_step: int,
-    anneal_end_step: int,
     **term_params,
 ) -> torch.Tensor:
-    """Wrap a scaffold reward with a linear fade to zero (v29).
+    """Wrap a scaffold reward with a progress-gated linear fade (v31).
 
-    Full strength through anneal_start_step, linear decay to zero at
-    anneal_end_step, exactly zero afterward. Lets a cold start learn on
-    the full shaping stack and then graduate onto the diet-2.0 economics
-    (capped hop displacement as sole tracking income) without a
-    checkpoint handoff.
+    v29 faded on the wall clock; v30 showed that fires even when the run
+    is behind schedule (ladder stuck, self-triggers dead) and bankrupts
+    the gait. The fade clock now lives in the jump command term, which
+    starts it only after the trigger handover completes, the policy
+    self-triggers at a healthy rate, and the speed ladder has earned its
+    first promotion.
     """
-    step = int(env.common_step_counter)
-    if step >= anneal_end_step:
+    progress = _jump_term(env).scaffold_fade_progress
+    if progress >= 1.0:
         return torch.zeros(env.num_envs, device=env.device)
     value = term_func(env, **term_params)
-    if step <= anneal_start_step:
+    if progress <= 0.0:
         return value
-    scale = 1.0 - (step - anneal_start_step) / float(
-        anneal_end_step - anneal_start_step
-    )
-    return value * scale
+    return value * (1.0 - progress)
 
 
 def build_reward_terms(
@@ -748,7 +823,7 @@ def build_reward_terms(
     free_hop_velocity: bool = False,
     trigger_handover: bool = False,
     reward_diet: bool = False,
-    scaffold_anneal_steps: tuple[int, int] | None = None,
+    scaffold_fade: bool = False,
 ) -> dict[str, RewardTermCfg]:
     terms = {
         "alive": RewardTermCfg(func=envs_mdp.is_alive, weight=1.0),
@@ -917,6 +992,10 @@ def build_reward_terms(
                     weight=-8.0,
                     params={"asset_cfg": _ROBOT_CFG, "moving_scale": 0.25},
                 )
+                # v34 restore: v21b ran with the plain 10 deg upright income
+                # at weight 4.0 (the full_pipeline default above); the v30
+                # stance-relaxed override postdates the working lineage and
+                # is removed to keep the replica faithful.
             terms["base_angular_velocity"].weight = -0.2
             terms["action_rate"].weight = -0.005
             terms["off_ground"].weight = -0.5
@@ -985,6 +1064,7 @@ def build_reward_terms(
                 # along command pays 10000*0.10*0.01 = 10 -- about one dwell
                 # income -- and a hop that ends in a crash never cashes in,
                 # so aim and surviving the landing are one objective.
+                # (v33: weights restored to the v21b-era raw-meters scale.)
                 terms["hop_displacement"] = RewardTermCfg(
                     func=hop_displacement_along_command,
                     weight=10000.0,
@@ -1046,23 +1126,24 @@ def build_reward_terms(
                 ):
                     terms.pop(name, None)
                 # Sole tracking income, doubled now that it carries the
-                # whole incentive: a full-accuracy hop (cap = command speed
-                # x hop period) pays ~2x the old v18 calibration.
+                # whole incentive: a full-accuracy hop pays ~2x the v18
+                # calibration (v31 fraction units: 2000*1.0*0.01 = 20).
                 terms["hop_displacement"] = RewardTermCfg(
                     func=hop_displacement_along_command,
-                    weight=20000.0,
+                    weight=2000.0,
                 )
                 # Noise tax with teeth: -0.005 made channel noise nearly
                 # free while the std ratchet ran.
                 terms["action_rate"].weight = -0.01
-            if scaffold_anneal_steps is not None:
+            if scaffold_fade:
                 # v29 annealed cold start: same endpoint economics as the
                 # v28 diet, reached by fading the shaping stack instead of
                 # deleting it. Scaffolds teach the skills (hop, aim, land),
                 # then linearly lose their income so the policy is weaned
                 # onto accuracy-only earnings within one run -- no
-                # overfit-to-old-rewards checkpoint to inherit.
-                start_step, end_step = scaffold_anneal_steps
+                # overfit-to-old-rewards checkpoint to inherit. v31: the
+                # fade clock is progress-gated by the jump command term
+                # (see annealed_reward docstring).
                 for name in (
                     "jump_apex_progress",
                     "landing_recovery_success",
@@ -1083,18 +1164,20 @@ def build_reward_terms(
                         weight=term.weight,
                         params={
                             "term_func": term.func,
-                            "anneal_start_step": start_step,
-                            "anneal_end_step": end_step,
                             **(term.params or {}),
                         },
                     )
                 # Diet-2.0 endpoint terms live at full strength from the
-                # start: the displacement payout is capped by the commanded
-                # distance, so it cannot out-shout the scaffolds early, and
-                # the critic gets its full history to learn the payout.
+                # start: the tent payout is bounded by the achieved fraction
+                # of the commanded distance, so it cannot out-shout the
+                # scaffolds early, and the critic gets its full history to
+                # learn the payout. 2000 in v31 fraction units = 20 per
+                # perfect hop at every rung -- decisively above the per-hop
+                # action/impact cost, so hopping stays solvent after the
+                # fade (the v30 bankruptcy).
                 terms["hop_displacement"] = RewardTermCfg(
                     func=hop_displacement_along_command,
-                    weight=20000.0,
+                    weight=2000.0,
                 )
                 terms["action_rate"].weight = -0.01
     if robust_balance:

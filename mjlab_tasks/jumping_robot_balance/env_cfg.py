@@ -151,22 +151,51 @@ DIRECT_CONTINUE_FALL_ANGLE_DEG = 80.0
 #   max(0.08, 0.6 x moving-command EMA)), i.e. genuinely better tracking.
 # v23: v22 finished at the 0.15 cap (one promotion earned), so the
 # continuation ladder starts there instead of re-earning 0.10.
-V22_SPEED_CURRICULUM_CAPS_M_S = (0.15, 0.25, 0.40)
+V22_SPEED_CURRICULUM_CAPS_M_S = (0.10, 0.15, 0.25, 0.40, 0.55)  # v37: 0.55 rung for the wide-speed campaign
 V22_TRIGGER_ANNEAL_STEPS = (0, 1)
 V22_PUSH_SCALE_SCHEDULE = (0, 0, 1, 0.5)
+# v39 hardware prep: ramp pushes from zero to FULL strength over the first
+# 2,000 iterations (64,000 env steps at 32 steps/iter). The v38 checkpoint
+# already tolerates 0.5-scale shoves, so the ramp mostly cushions the first
+# few hundred iterations while the friction randomization settles in.
+V39_PUSH_SCALE_SCHEDULE = (0, 0, 64000, 1.0)
 FREE_HOP_MAX_SPEED_M_S = 0.15
 
 # v29 annealed cold start: fresh weights, full direct-pipeline curriculum,
 # but the shaping rewards (apex clearance, trigger bonus, takeoff impulse,
 # gated velocity terms, ...) linearly fade to zero after the jump handover,
 # leaving the diet-2.0 economics (capped hop displacement as the only
-# tracking income). Transitions are deliberately non-overlapping (v20
-# lesson): handover 5000-7000, scaffold fade 7500-9500, pushes return
-# 9500-11500. Plan ~12000 iterations.
-V29_SCAFFOLD_ANNEAL_START_STEP = 7_500 * _PPO_STEPS_PER_ITERATION
-V29_SCAFFOLD_ANNEAL_END_STEP = 9_500 * _PPO_STEPS_PER_ITERATION
+# tracking income). Pushes stay on the wall clock (they are robustness
+# noise, not a skill gate). Plan ~12000 iterations.
 V29_PUSH_RAMP_START_STEP = 9_500 * _PPO_STEPS_PER_ITERATION
 V29_PUSH_RAMP_END_STEP = 11_500 * _PPO_STEPS_PER_ITERATION
+# v31: the v29/v30 clock-scheduled transitions fired regardless of whether
+# the run was ready (v30: hops started on a policy still falling every
+# ~2.5 s; the scaffold fade ran while the ladder was stuck at rung one and
+# bankrupted the gait). Phase transitions are now progress-gated:
+# - Hops start when the balance phase has converged (EMA fraction of envs
+#   tilted past 30 deg below this threshold), not on the clock alone.
+# - Velocity commands follow the hop-start latch by a fixed offset.
+# - The scaffold fade latch lives in the jump command term: handover
+#   complete + healthy self-trigger rate + first earned speed promotion,
+#   then a linear fade over the duration below.
+# The ladder starts at 0.20 m/s: at the old 0.05 rung the tent income per
+# hop was microscopic and standing still nearly satisfied the tracking
+# kernel; 0.20 gives the gate real separation from the standstill error.
+V31_BALANCE_GATE_UPSET_THRESHOLD = 0.02
+V31_COMMAND_START_OFFSET_STEPS = 250 * _PPO_STEPS_PER_ITERATION
+V31_SCAFFOLD_FADE_DURATION_STEPS = 2_000 * _PPO_STEPS_PER_ITERATION
+V31_SPEED_CURRICULUM_CAPS_M_S = (0.20, 0.30, 0.40)
+# v32: promotions gate on per-hop displacement accuracy -- the EMA of the
+# tent fraction (achieved fraction of commanded hop distance) must clear
+# this. The v31 velocity-error gate (error < 0.6 x command) was never
+# passed by any lineage (best ratio ~1.03): a hopper is stationary between
+# ballistic hops, so hop-averaged vector velocity error can't reach 60% of
+# the command. 0.5 means hops consistently land within +/-50% of the
+# commanded distance along the command. The push ramp is also gated now:
+# it anchors on scaffold-fade completion instead of the wall clock (v31's
+# clock ramp fired into an unpromoted run and ended its plateau).
+V32_HOP_FRACTION_PROMOTION_THRESHOLD = 0.5
 
 
 def _configure_scene_spec(spec: mujoco.MjSpec) -> None:
@@ -236,6 +265,8 @@ def jumping_robot_balance_env_cfg(
             sensor_noise=strong_robust_balance or navigation,
             navigation=navigation,
             actor_velocity_estimate=direct_lineage,
+            # v40: 0-20 ms randomized actor-side sensor latency for hardware.
+            sensor_latency=speed_continue,
         ),
         actions=(
             build_free_hop_action_terms()
@@ -285,11 +316,7 @@ def jumping_robot_balance_env_cfg(
             relaxed_stance_tilt=direct_lineage,
             free_hop_velocity=free_hop_velocity,
             trigger_handover=direct_lineage,
-            scaffold_anneal_steps=(
-                (V29_SCAFFOLD_ANNEAL_START_STEP, V29_SCAFFOLD_ANNEAL_END_STEP)
-                if annealed_pipeline
-                else None
-            ),
+            scaffold_fade=annealed_pipeline,
         ),
         terminations=build_termination_terms(
             fall_angle_deg=(
@@ -338,8 +365,10 @@ def jumping_robot_balance_env_cfg(
                     V19_PUSH_RAMP_FINAL_SCALE,
                 )
                 if direct_pipeline
-                else (V22_PUSH_SCALE_SCHEDULE if speed_continue else None)
+                else (V39_PUSH_SCALE_SCHEDULE if speed_continue else None)
             ),
+            push_gate_on_scaffold_fade=annealed_pipeline,
+            foot_friction_randomization=speed_continue,
         )
 
     commands = (
@@ -398,6 +427,16 @@ def jumping_robot_balance_env_cfg(
                         )
                     )
                 ),
+                balance_gate_upset_threshold=(
+                    V31_BALANCE_GATE_UPSET_THRESHOLD
+                    if annealed_pipeline
+                    else None
+                ),
+                scaffold_fade_duration_steps=(
+                    V31_SCAFFOLD_FADE_DURATION_STEPS
+                    if annealed_pipeline
+                    else None
+                ),
             )
         )
     if navigation:
@@ -408,13 +447,33 @@ def jumping_robot_balance_env_cfg(
                     command_start_step if full_pipeline else None
                 ),
                 speed_curriculum_caps=(
-                    V22_SPEED_CURRICULUM_CAPS_M_S
-                    if speed_continue
+                    V31_SPEED_CURRICULUM_CAPS_M_S
+                    if annealed_pipeline
                     else (
-                        V16_SPEED_CURRICULUM_CAPS_M_S
-                        if direct_lineage
-                        else None
+                        # v38: no ladder for the wide-speed campaign.
+                        # v37 sat on the 0.10 rung for 8,000 iterations
+                        # because the 0.08 promotion gate sits below the
+                        # gait's per-hop scatter floor (~0.10-0.15). A
+                        # competent checkpoint doesn't need the gate;
+                        # sample the full range instead.
+                        None
+                        if speed_continue
+                        else (
+                            V16_SPEED_CURRICULUM_CAPS_M_S
+                            if direct_lineage
+                            else None
+                        )
                     )
+                ),
+                command_start_follows_jump_offset_steps=(
+                    V31_COMMAND_START_OFFSET_STEPS
+                    if annealed_pipeline
+                    else None
+                ),
+                speed_gate_hop_fraction_threshold=(
+                    V32_HOP_FRACTION_PROMOTION_THRESHOLD
+                    if annealed_pipeline
+                    else None
                 ),
                 speed_curriculum_relative_threshold=(
                     DIRECT_CONTINUE_SPEED_GATE_RATIO
@@ -429,7 +488,9 @@ def jumping_robot_balance_env_cfg(
                 max_speed_m_s=(
                     FREE_HOP_MAX_SPEED_M_S
                     if free_hop_velocity
-                    else 0.40
+                    # v37: sample up to the new top rung during the
+                    # wide-speed campaign; other stages keep 0.40.
+                    else (0.55 if speed_continue else 0.40)
                 ),
                 apply_only_when_grounded=free_hop_velocity,
             )
